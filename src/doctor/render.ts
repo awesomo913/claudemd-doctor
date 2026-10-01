@@ -87,6 +87,33 @@ function shortenPath(absolutePath: string, homeDir: string, cwd: string): string
   return normalized;
 }
 
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+/** Length of a string as it will actually occupy on screen, ignoring ANSI color codes. */
+function visibleLength(s: string): number {
+  return s.replace(ANSI_RE, "").length;
+}
+
+/** Terminal width to wrap/fit against — real column count when we have a TTY, 100 otherwise (matches the GIF/CI default). */
+function terminalWidth(): number {
+  const columns = process.stdout.columns;
+  return columns && columns > 0 ? columns : 100;
+}
+
+/**
+ * Truncate `text` to fit within `maxLength` visible characters, cutting at
+ * the last whole word instead of mid-word, then appending an ellipsis. A
+ * cut point that would throw away more than 40% of the budget (no good
+ * word boundary nearby) just hard-cuts instead of under-filling the line.
+ */
+function truncateAtWord(text: string, maxLength: number): string {
+  if (text.length <= maxLength) return text;
+  const slice = text.slice(0, Math.max(0, maxLength - 1));
+  const lastSpace = slice.lastIndexOf(" ");
+  const cut = lastSpace >= maxLength * 0.6 ? slice.slice(0, lastSpace) : slice;
+  return `${cut.trimEnd()}…`;
+}
+
 // ---------------------------------------------------------------------------
 // JSON
 // ---------------------------------------------------------------------------
@@ -168,9 +195,15 @@ function renderTreeLines(nodes: AnnotatedNode[], prefix: string, lines: string[]
   });
 }
 
+/** Available width for a quoted rule/conflict excerpt at the given indent, inside the terminal (or the 100-col default). */
+function quoteBudget(indent: number): number {
+  // -2 for the surrounding "..." quote marks.
+  return Math.max(20, terminalWidth() - indent - 2);
+}
+
 function renderRuleFinding(f: RuleFinding, sessionsNote: string, homeDir: string, cwd: string): string {
   const head = f.heading ? pc.dim(` (under "${f.heading}")`) : "";
-  const truncated = f.text.length > 100 ? `${f.text.slice(0, 100)}…` : f.text;
+  const truncated = truncateAtWord(f.text, quoteBudget(4));
   const displayPath = shortenPath(f.file, homeDir, cwd);
   return `  ${pc.dim(`${displayPath}:${f.line}`)} ${pc.cyan(`≈${f.tokenCost} tok`)}${head}\n    "${truncated}"\n    ${pc.dim(sessionsNote)}`;
 }
@@ -178,43 +211,80 @@ function renderRuleFinding(f: RuleFinding, sessionsNote: string, homeDir: string
 function renderConflict(c: ConflictFinding, homeDir: string, cwd: string): string {
   const aPath = shortenPath(c.a.file, homeDir, cwd);
   const bPath = shortenPath(c.b.file, homeDir, cwd);
+  const budget = quoteBudget(4);
+  const aText = truncateAtWord(c.a.text, budget);
+  const bText = truncateAtWord(c.b.text, budget);
   if (c.kind === "duplicate") {
     return (
       `  ${pc.yellow("near-duplicate")} (${(c.similarity * 100).toFixed(0)}% similar)\n` +
-      `    ${pc.dim(`${aPath}:${c.a.line}`)} "${c.a.text.slice(0, 80)}"\n` +
-      `    ${pc.dim(`${bPath}:${c.b.line}`)} "${c.b.text.slice(0, 80)}"`
+      `    ${pc.dim(`${aPath}:${c.a.line}`)} "${aText}"\n` +
+      `    ${pc.dim(`${bPath}:${c.b.line}`)} "${bText}"`
     );
   }
   return (
     `  ${pc.red("polarity conflict")} on anchor \`${c.anchor}\`\n` +
-    `    ${pc.dim(`${aPath}:${c.a.line}`)} [${c.a.polarity}] "${c.a.text.slice(0, 80)}"\n` +
-    `    ${pc.dim(`${bPath}:${c.b.line}`)} [${c.b.polarity}] "${c.b.text.slice(0, 80)}"`
+    `    ${pc.dim(`${aPath}:${c.a.line}`)} [${c.a.polarity}] "${aText}"\n` +
+    `    ${pc.dim(`${bPath}:${c.b.line}`)} [${c.b.polarity}] "${bText}"`
   );
+}
+
+/** Plain-text (uncolored) pieces of the summary, shared by the one-line and two-line layouts. */
+interface SummaryPieces {
+  tokens: string;
+  money: string | undefined;
+  percent: string | undefined;
+  conflicts: string;
+}
+
+function summaryPieces(report: DoctorReport): SummaryPieces {
+  const s = report.summary;
+  return {
+    tokens: `${pc.bold(`≈${s.chainTokens.toLocaleString()} tokens`)} re-sent every turn`,
+    money:
+      s.monthlyCachedUsd !== undefined && s.monthlyUncachedUsd !== undefined
+        ? `${pc.bold(formatUsd(s.monthlyCachedUsd))}/mo ${s.monthlyCachedIsMeasured ? "cached" : "cached, est."} (${formatUsd(s.monthlyUncachedUsd)} uncached)`
+        : undefined,
+    percent: s.neverReferencedPercent !== undefined ? `${pc.bold(`${s.neverReferencedPercent.toFixed(1)}%`)} never referenced` : undefined,
+    conflicts:
+      s.conflictsCount > 0
+        ? `${pc.red(pc.bold(String(s.conflictsCount)))} conflict${s.conflictsCount === 1 ? "" : "s"}`
+        : `${s.conflictsCount} conflicts`,
+  };
 }
 
 /**
  * The GIF's "money shot": a compact boxed one-glance summary before
- * section 1. Ragged-right box (no right border) so colored text doesn't
- * need visible-width math to stay aligned.
+ * section 1, sized to both its content and the real terminal width
+ * (`process.stdout.columns`, 100 when not a TTY). Everything on one line
+ * when it fits; otherwise a deliberate two-line split (tokens + $/mo on
+ * line 1, % never-referenced + conflicts on line 2) rather than letting
+ * the terminal wrap mid-segment.
  */
 function renderSummaryBoxPretty(report: DoctorReport): string[] {
-  const s = report.summary;
+  const pieces = summaryPieces(report);
+  const sep = pc.dim("  ·  ");
+  const available = terminalWidth();
+  const prefixWidth = 3; // "│  "
+
+  const line1Parts = [pieces.tokens, pieces.money].filter((p): p is string => p !== undefined);
+  const line2Parts = [pieces.percent, pieces.conflicts].filter((p): p is string => p !== undefined);
+  const oneLine = [...line1Parts, ...line2Parts].join(sep);
+
+  const contentLines = visibleLength(oneLine) + prefixWidth <= available ? [oneLine] : [line1Parts.join(sep), line2Parts.join(sep)];
+
+  const innerWidth = Math.max(...contentLines.map((l) => visibleLength(l)));
+  // The terminal width only decides whether to split into two lines above —
+  // once split, the border is sized to match whatever the content actually
+  // needs, never truncated further (there's nothing sensible left to cut
+  // from "$X/mo cached ($Y uncached)" without losing real information).
+  const boxWidth = innerWidth + prefixWidth + 1;
+  const headerLabel = " summary ";
+  const topDashes = Math.max(0, boxWidth - 2 - headerLabel.length);
+
   const out: string[] = [];
-  out.push(pc.dim("┌─ summary ") + pc.dim("─".repeat(40)));
-
-  const parts: string[] = [pc.bold(`≈${s.chainTokens.toLocaleString()} tokens`) + " re-sent every turn"];
-  if (s.monthlyCachedUsd !== undefined && s.monthlyUncachedUsd !== undefined) {
-    const label = s.monthlyCachedIsMeasured ? "cached" : "cached, est.";
-    parts.push(`${pc.bold(formatUsd(s.monthlyCachedUsd))}/mo ${label} (${formatUsd(s.monthlyUncachedUsd)} uncached)`);
-  }
-  if (s.neverReferencedPercent !== undefined) {
-    parts.push(pc.bold(`${s.neverReferencedPercent.toFixed(1)}%`) + " never referenced");
-  }
-  const conflictText = `${s.conflictsCount} conflict${s.conflictsCount === 1 ? "" : "s"}`;
-  parts.push(s.conflictsCount > 0 ? pc.red(pc.bold(String(s.conflictsCount))) + ` conflict${s.conflictsCount === 1 ? "" : "s"}` : conflictText);
-
-  out.push(`│  ${parts.join(pc.dim("  ·  "))}`);
-  out.push(pc.dim("└" + "─".repeat(50)));
+  out.push(pc.dim(`┌─${headerLabel}${"─".repeat(topDashes)}`));
+  for (const line of contentLines) out.push(`│  ${line}`);
+  out.push(pc.dim(`└${"─".repeat(Math.max(0, boxWidth - 1))}`));
   return out;
 }
 
@@ -457,7 +527,7 @@ export function renderMarkdown(report: DoctorReport, options: RenderOptions = {}
     const n = report.measured?.sessionsScanned ?? 0;
     const shown = options.showAllRules ? report.unreferencedRules : report.unreferencedRules.slice(0, UNREFERENCED_PRETTY_LIMIT);
     for (const f of shown) {
-      out.push(`- \`${shortenPath(f.file, homeDir, cwd)}:${f.line}\` (≈${f.tokenCost} tok) — "${f.text.slice(0, 100)}" — never referenced in ${n} session(s)`);
+      out.push(`- \`${shortenPath(f.file, homeDir, cwd)}:${f.line}\` (≈${f.tokenCost} tok) — "${truncateAtWord(f.text, 100)}" — never referenced in ${n} session(s)`);
     }
     const remaining = report.unreferencedRules.length - shown.length;
     if (remaining > 0) out.push(`- _+${remaining} more (use --all-rules or --json)_`);

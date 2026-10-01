@@ -70,23 +70,39 @@ function iso(daysAgo, idx) {
   return d.toISOString();
 }
 
-function usageFor(idx) {
-  // Sized so the average per-turn context comfortably exceeds the demo's
-  // ~8.7k-token instruction chain (as a real coding-agent turn's context —
-  // conversation history, file contents, tool output — normally does),
-  // landing the "instructions as % of request" headline in a believable
-  // 15-40% range instead of an impossible >100%.
-  const base = 9000 + (idx % 7) * 900; // first-turn-in-session cache write
-  const read = idx % 4 === 0 ? 0 : 21000 + (idx % 11) * 1400; // later-turn cache hit
+/**
+ * Realistic cache-read-vs-write split: the FIRST assistant turn of a
+ * session writes the instruction chain into cache (cache_creation, no
+ * read yet); every later turn mostly re-reads that same growing cached
+ * prefix (cache_read) and only writes a small increment for its own new
+ * content. On a real machine's measured StolenEmerald history, ~98% of
+ * input-side tokens are cache reads — the first synthetic demo data set
+ * had this backwards (big writes every turn), making "cached" look only
+ * ~38% cheaper than "uncached" instead of the realistic ~10x.
+ *
+ * `turnIndexInSession` is 0-indexed within its session.
+ */
+function usageFor(turnIndexInSession) {
+  const CHAIN_APPROX = 8700; // close to the demo's real ≈8,686-token chain
+
+  if (turnIndexInSession === 0) {
+    return {
+      input_tokens: 25,
+      cache_creation_input_tokens: CHAIN_APPROX,
+      cache_read_input_tokens: 0,
+      output_tokens: 90,
+      cache_creation: { ephemeral_5m_input_tokens: CHAIN_APPROX, ephemeral_1h_input_tokens: 0 },
+    };
+  }
+
+  const smallWrite = 90; // this turn's own new content joining the cache — flat, not growing with session length
+  const growingRead = CHAIN_APPROX + turnIndexInSession * 1500; // the whole prefix so far, re-read
   return {
-    input_tokens: 30 + (idx % 5) * 4,
-    cache_creation_input_tokens: base,
-    cache_read_input_tokens: read,
-    output_tokens: 80 + (idx % 9) * 15,
-    cache_creation: {
-      ephemeral_5m_input_tokens: base,
-      ephemeral_1h_input_tokens: 0,
-    },
+    input_tokens: 20 + turnIndexInSession * 2,
+    cache_creation_input_tokens: smallWrite,
+    cache_read_input_tokens: growingRead,
+    output_tokens: 70 + turnIndexInSession * 10,
+    cache_creation: { ephemeral_5m_input_tokens: smallWrite, ephemeral_1h_input_tokens: 0 },
   };
 }
 
@@ -94,7 +110,10 @@ const SESSION_COUNT = 30;
 for (let s = 0; s < SESSION_COUNT; s += 1) {
   const sessionId = `demo-session-${String(s + 1).padStart(4, "0")}`;
   const lines = [];
-  const turnsInSession = 2 + (s % 3); // 2-4 assistant turns per session
+  // Longer sessions than a short demo would normally bother with — needed
+  // so the read-dominated turns actually outweigh each session's one-time
+  // cache-write turn, matching the ratio a real multi-hour session shows.
+  const turnsInSession = 150 + (s % 60); // 150-209 assistant turns per session
   const userPrompt = USER_PROMPTS[s % USER_PROMPTS.length];
 
   lines.push(
@@ -119,7 +138,7 @@ for (let s = 0; s < SESSION_COUNT; s += 1) {
           role: "assistant",
           model: MODEL,
           content: [{ type: "text", text: replyText }],
-          usage: usageFor(s * 7 + t),
+          usage: usageFor(t),
         },
       }),
     );

@@ -12,9 +12,10 @@
 ![demo](docs/assets/demo.gif)
 
 ```
-┌─ summary ────────────────────────────────────────
-│  ≈8,686 tokens re-sent every turn  ·  $65.01/mo cached ($104.23 uncached)  ·  18.6% never referenced  ·  1 conflict
-└──────────────────────────────────────────────────
+┌─ summary ─────────────────────────────────────────────────────────────────
+│  ≈8,686 tokens re-sent every turn  ·  $11.43/mo cached ($104.23 uncached)
+│  18.6% never referenced  ·  1 conflict
+└───────────────────────────────────────────────────────────────────────────
 ```
 
 ## Why
@@ -26,9 +27,10 @@ whether all of it is actually doing anything. On the bundled demo fixture
 (`npm run demo` — a synthetic, 30-session project, not a real one):
 
 - The instruction chain is **≈8,686 tokens**, re-sent on **every single turn**.
-- At 200 turns/day that's **≈$65/month cached** (Claude Code caches the
-  instruction prefix, so this is the realistic number) — **≈$104/month** if
-  it never hit cache at all.
+- At 200 turns/day that's **≈$11/month cached** (Claude Code caches the
+  instruction prefix, so this is the realistic number — most turns in a real
+  session just re-read that cached prefix) — **≈$104/month** if it never hit
+  cache at all, roughly **9x more expensive**.
 - **18.6% of those tokens (≈1,618/turn)** come from rules that were never
   referenced across the demo's 30 synthetic sessions — four of them look
   exactly like the "kept around just in case" rules every long-lived
@@ -79,14 +81,15 @@ Run it from inside any project. No config, no flags required.
 ## Example output
 
 ```
-claudemd-doctor — <your project>
+claudemd-doctor — D:\demo-project
 
-┌─ summary ────────────────────────────────────────
-│  ≈8,686 tokens re-sent every turn  ·  $65.01/mo cached ($104.23 uncached)  ·  18.6% never referenced  ·  1 conflict
-└──────────────────────────────────────────────────
+┌─ summary ─────────────────────────────────────────────────────────────────
+│  ≈8,686 tokens re-sent every turn  ·  $11.43/mo cached ($104.23 uncached)
+│  18.6% never referenced  ·  1 conflict
+└───────────────────────────────────────────────────────────────────────────
 
 1. Instruction tree (load order, ≈ tokens = offline estimate)
-├── ~/.claude/CLAUDE.md [user] ≈224 tok 2.6%
+├── ~/.claude/CLAUDE.md [user] ≈224 tok 4.1%
 │   └── ~/.claude/shared.md [import] ≈128 tok 1.5%
 ├── ~/.claude/rules/accessibility.md [rules] ≈251 tok 2.9%
 ├── ~/.claude/rules/legacy-build-pipeline.md [rules] ≈192 tok 2.2%
@@ -101,29 +104,29 @@ Total: ≈8,686 tokens
 
 3. Measured reality (from real transcripts)
   Sessions: 30 exist, 30 of 30 scanned
-  Assistant turns in scanned sessions: 90
+  Assistant turns in scanned sessions: 4,935
 
-  (a) Instruction tokens re-sent ≈ 90 turns × ≈8,686 chain tok ≈ 781,740 tok
-  (b) Total measured input-side context across those turns: 2,768,220 tok
-  (c) Instructions are ≈28.2% of the average request
-  (d) $ for (a), priced per-turn by that turn's own model: $0.975
+  (a) Instruction tokens re-sent ≈ 4935 turns × ≈8,686 chain tok ≈ 42,865,410 tok
+  (b) Total measured input-side context across those turns: 651,123,920 tok
+  (c) Instructions are ≈6.6% of the average request
+  (d) $ for (a), priced per-turn by that turn's own model: $9.40
 
 4. Unreferenced rules (never referenced in scanned transcripts — not a claim they're useless)
   ≈1,618 tokens/turn (18.6%) are rules never referenced in 30 sessions
 
   ~/.claude/rules/legacy-build-pipeline.md:3 ≈166 tok (under "Legacy Build Pipeline (pending removal)")
-    "The old Grunt-based asset pipeline under `tools/legacy-grunt/` is kept only for the three downstream…"
+    "The old Grunt-based asset pipeline under `tools/legacy-grunt/` is kept only for the three…"
     never referenced in 30 session(s)
-  ~/.claude/rules/retired-api-migration.md:3 ≈152 tok (under "Retired API Migration Notes (v1 -> v2, ...)")
-    "When the internal API moved from `/api/v1/` to `/api/v2/` three years ago, every client needed to ad…"
+  ~/.claude/rules/retired-api-migration.md:3 ≈152 tok (under "Retired API Migration Notes (v1 -> v2, completed, kept for history)")
+    "When the internal API moved from `/api/v1/` to `/api/v2/` three years ago, every client…"
     never referenced in 30 session(s)
   ... (+23 more — use --all-rules or --json)
   127 rule(s) unmeasurable (no extractable anchors)
 
 5. Conflicts & duplicates (heuristic, offline)
   polarity conflict on anchor `npm`
-    ~/.claude/CLAUDE.md:8 [positive] "Always use `npm` to install dependencies in this repo — the committed lockfile i"
-    ~/.claude/shared.md:3 [negative] "Never use `npm` in this repo — always use `pnpm install` instead. The lockfile w"
+    ~/.claude/CLAUDE.md:8 [positive] "Always use `npm` to install dependencies in this repo — the committed lockfile is npm's."
+    ~/.claude/shared.md:3 [negative] "Never use `npm` in this repo — always use `pnpm install` instead. The lockfile was migrated…"
 ```
 
 (Taken from `npm run demo` — the synthetic fixture under `demo/`, not a real project.)
