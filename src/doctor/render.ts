@@ -4,6 +4,7 @@
  * (`isColorSupported`), so no extra detection is needed here.
  */
 import pc from "picocolors";
+import path from "node:path";
 import type { DoctorReport, RuleFinding } from "./report.js";
 import type { TreeNode } from "./discovery.js";
 import type { ConflictFinding } from "./conflicts.js";
@@ -61,6 +62,31 @@ export function formatUsd(n: number): string {
   return `$${n.toFixed(2)}`;
 }
 
+/**
+ * Display-only path shortening: a path under the home dir renders as
+ * "~/...", a path under cwd renders as "./...", anything else stays
+ * absolute. Pretty/markdown only — JSON always keeps full absolute paths
+ * (a script parsing JSON shouldn't have to guess what "~" resolves to).
+ * Fixes both the GIF's line-wrapping (absolute paths on this dev machine
+ * ran 60+ characters) and real usernames/paths leaking into a pasted
+ * screenshot.
+ */
+function shortenPath(absolutePath: string, homeDir: string, cwd: string): string {
+  const normalized = path.resolve(absolutePath);
+  const normalizedHome = path.resolve(homeDir);
+  const normalizedCwd = path.resolve(cwd);
+
+  if (normalized === normalizedHome) return "~";
+  if (normalized.startsWith(normalizedHome + path.sep)) {
+    return `~/${normalized.slice(normalizedHome.length + 1).split(path.sep).join("/")}`;
+  }
+  if (normalized === normalizedCwd) return ".";
+  if (normalized.startsWith(normalizedCwd + path.sep)) {
+    return `./${normalized.slice(normalizedCwd.length + 1).split(path.sep).join("/")}`;
+  }
+  return normalized;
+}
+
 // ---------------------------------------------------------------------------
 // JSON
 // ---------------------------------------------------------------------------
@@ -84,6 +110,7 @@ export function renderJson(report: DoctorReport, options: RenderOptions = {}): s
     schemaVersion: 3,
     cwd: report.cwd,
     generatedAt: report.generatedAt,
+    summary: report.summary,
     tree: annotated,
     totalTokensApprox: report.totalTokens,
     treeWarnings: report.treeWarnings,
@@ -122,43 +149,87 @@ function kindLabel(kind: TreeNode["kind"]): string {
   }
 }
 
-function renderTreeLines(nodes: AnnotatedNode[], prefix: string, lines: string[]): void {
+function renderTreeLines(nodes: AnnotatedNode[], prefix: string, lines: string[], homeDir: string, cwd: string): void {
   nodes.forEach((node, idx) => {
     const isLast = idx === nodes.length - 1;
     const connector = isLast ? "└── " : "├── ";
     const childPrefix = prefix + (isLast ? "    " : "│   ");
+    const displayPath = shortenPath(node.filePath, homeDir, cwd);
 
     const label = pc.dim(`[${kindLabel(node.kind)}]`);
     if (!node.exists) {
-      lines.push(`${prefix}${connector}${pc.yellow(node.filePath)} ${label} ${pc.red(`MISSING (${node.error})`)}`);
+      lines.push(`${prefix}${connector}${pc.yellow(displayPath)} ${label} ${pc.red(`MISSING (${node.error})`)}`);
       return;
     }
     const tokenInfo = pc.cyan(`≈${node.tokens.toLocaleString()} tok`);
     const pct = pc.dim(`${node.percentOfTotal.toFixed(1)}%`);
-    lines.push(`${prefix}${connector}${node.filePath} ${label} ${tokenInfo} ${pct}`);
-    renderTreeLines(node.children, childPrefix, lines);
+    lines.push(`${prefix}${connector}${displayPath} ${label} ${tokenInfo} ${pct}`);
+    renderTreeLines(node.children, childPrefix, lines, homeDir, cwd);
   });
 }
 
-function renderRuleFinding(f: RuleFinding, sessionsNote: string): string {
+function renderRuleFinding(f: RuleFinding, sessionsNote: string, homeDir: string, cwd: string): string {
   const head = f.heading ? pc.dim(` (under "${f.heading}")`) : "";
   const truncated = f.text.length > 100 ? `${f.text.slice(0, 100)}…` : f.text;
-  return `  ${pc.dim(`${f.file}:${f.line}`)} ${pc.cyan(`≈${f.tokenCost} tok`)}${head}\n    "${truncated}"\n    ${pc.dim(sessionsNote)}`;
+  const displayPath = shortenPath(f.file, homeDir, cwd);
+  return `  ${pc.dim(`${displayPath}:${f.line}`)} ${pc.cyan(`≈${f.tokenCost} tok`)}${head}\n    "${truncated}"\n    ${pc.dim(sessionsNote)}`;
 }
 
-function renderConflict(c: ConflictFinding): string {
+function renderConflict(c: ConflictFinding, homeDir: string, cwd: string): string {
+  const aPath = shortenPath(c.a.file, homeDir, cwd);
+  const bPath = shortenPath(c.b.file, homeDir, cwd);
   if (c.kind === "duplicate") {
     return (
       `  ${pc.yellow("near-duplicate")} (${(c.similarity * 100).toFixed(0)}% similar)\n` +
-      `    ${pc.dim(`${c.a.file}:${c.a.line}`)} "${c.a.text.slice(0, 80)}"\n` +
-      `    ${pc.dim(`${c.b.file}:${c.b.line}`)} "${c.b.text.slice(0, 80)}"`
+      `    ${pc.dim(`${aPath}:${c.a.line}`)} "${c.a.text.slice(0, 80)}"\n` +
+      `    ${pc.dim(`${bPath}:${c.b.line}`)} "${c.b.text.slice(0, 80)}"`
     );
   }
   return (
     `  ${pc.red("polarity conflict")} on anchor \`${c.anchor}\`\n` +
-    `    ${pc.dim(`${c.a.file}:${c.a.line}`)} [${c.a.polarity}] "${c.a.text.slice(0, 80)}"\n` +
-    `    ${pc.dim(`${c.b.file}:${c.b.line}`)} [${c.b.polarity}] "${c.b.text.slice(0, 80)}"`
+    `    ${pc.dim(`${aPath}:${c.a.line}`)} [${c.a.polarity}] "${c.a.text.slice(0, 80)}"\n` +
+    `    ${pc.dim(`${bPath}:${c.b.line}`)} [${c.b.polarity}] "${c.b.text.slice(0, 80)}"`
   );
+}
+
+/**
+ * The GIF's "money shot": a compact boxed one-glance summary before
+ * section 1. Ragged-right box (no right border) so colored text doesn't
+ * need visible-width math to stay aligned.
+ */
+function renderSummaryBoxPretty(report: DoctorReport): string[] {
+  const s = report.summary;
+  const out: string[] = [];
+  out.push(pc.dim("┌─ summary ") + pc.dim("─".repeat(40)));
+
+  const parts: string[] = [pc.bold(`≈${s.chainTokens.toLocaleString()} tokens`) + " re-sent every turn"];
+  if (s.monthlyCachedUsd !== undefined && s.monthlyUncachedUsd !== undefined) {
+    const label = s.monthlyCachedIsMeasured ? "cached" : "cached, est.";
+    parts.push(`${pc.bold(formatUsd(s.monthlyCachedUsd))}/mo ${label} (${formatUsd(s.monthlyUncachedUsd)} uncached)`);
+  }
+  if (s.neverReferencedPercent !== undefined) {
+    parts.push(pc.bold(`${s.neverReferencedPercent.toFixed(1)}%`) + " never referenced");
+  }
+  const conflictText = `${s.conflictsCount} conflict${s.conflictsCount === 1 ? "" : "s"}`;
+  parts.push(s.conflictsCount > 0 ? pc.red(pc.bold(String(s.conflictsCount))) + ` conflict${s.conflictsCount === 1 ? "" : "s"}` : conflictText);
+
+  out.push(`│  ${parts.join(pc.dim("  ·  "))}`);
+  out.push(pc.dim("└" + "─".repeat(50)));
+  return out;
+}
+
+function renderSummaryLineMarkdown(report: DoctorReport): string {
+  const s = report.summary;
+  const parts: string[] = [`**≈${s.chainTokens.toLocaleString()} tokens** re-sent every turn`];
+  if (s.monthlyCachedUsd !== undefined && s.monthlyUncachedUsd !== undefined) {
+    const label = s.monthlyCachedIsMeasured ? "cached" : "cached, est.";
+    parts.push(`**${formatUsd(s.monthlyCachedUsd)}/mo** ${label} (${formatUsd(s.monthlyUncachedUsd)} uncached)`);
+  }
+  if (s.neverReferencedPercent !== undefined) {
+    parts.push(`**${s.neverReferencedPercent.toFixed(1)}%** never referenced`);
+  }
+  parts.push(`**${s.conflictsCount}** conflict${s.conflictsCount === 1 ? "" : "s"}`);
+  return `> ${parts.join(" · ")}`;
 }
 
 function renderMeasuredRealityLines(report: DoctorReport, out: string[]): void {
@@ -201,13 +272,16 @@ function renderMeasuredRealityLines(report: DoctorReport, out: string[]): void {
 
 export function renderPretty(report: DoctorReport, options: RenderOptions = {}): string {
   const annotated = annotateTree(report.tree, report.totalTokens);
+  const { homeDir, cwd } = report;
   const out: string[] = [];
 
   out.push(pc.bold(`claudemd-doctor — ${report.cwd}`));
   out.push("");
+  out.push(...renderSummaryBoxPretty(report));
+  out.push("");
   out.push(pc.bold("1. Instruction tree") + pc.dim(" (load order, ≈ tokens = offline estimate)"));
   const treeLines: string[] = [];
-  renderTreeLines(annotated, "", treeLines);
+  renderTreeLines(annotated, "", treeLines, homeDir, cwd);
   out.push(...treeLines);
   out.push(pc.bold(`Total: ≈${report.totalTokens.toLocaleString()} tokens`));
   if (report.treeWarnings.length > 0) {
@@ -254,7 +328,7 @@ export function renderPretty(report: DoctorReport, options: RenderOptions = {}):
     const n = report.measured?.sessionsScanned ?? 0;
     const shown = options.showAllRules ? report.unreferencedRules : report.unreferencedRules.slice(0, UNREFERENCED_PRETTY_LIMIT);
     for (const f of shown) {
-      out.push(renderRuleFinding(f, `never referenced in ${n} session(s)`));
+      out.push(renderRuleFinding(f, `never referenced in ${n} session(s)`, homeDir, cwd));
     }
     const remaining = report.unreferencedRules.length - shown.length;
     if (remaining > 0) {
@@ -270,7 +344,7 @@ export function renderPretty(report: DoctorReport, options: RenderOptions = {}):
   if (report.conflicts.length === 0) {
     out.push(`  ${pc.green("none found")}`);
   } else {
-    for (const c of report.conflicts) out.push(renderConflict(c));
+    for (const c of report.conflicts) out.push(renderConflict(c, homeDir, cwd));
   }
 
   if (report.failOverExceeded) {
@@ -285,32 +359,36 @@ export function renderPretty(report: DoctorReport, options: RenderOptions = {}):
 // Markdown
 // ---------------------------------------------------------------------------
 
-function renderTreeMarkdown(nodes: AnnotatedNode[], depth: number, lines: string[]): void {
+function renderTreeMarkdown(nodes: AnnotatedNode[], depth: number, lines: string[], homeDir: string, cwd: string): void {
   for (const node of nodes) {
     const indent = "  ".repeat(depth);
+    const displayPath = shortenPath(node.filePath, homeDir, cwd);
     if (!node.exists) {
-      lines.push(`${indent}- \`${node.filePath}\` *(${kindLabel(node.kind)})* — **MISSING** (${node.error})`);
+      lines.push(`${indent}- \`${displayPath}\` *(${kindLabel(node.kind)})* — **MISSING** (${node.error})`);
     } else {
       lines.push(
-        `${indent}- \`${node.filePath}\` *(${kindLabel(node.kind)})* — ≈${node.tokens.toLocaleString()} tok (${node.percentOfTotal.toFixed(1)}%)`,
+        `${indent}- \`${displayPath}\` *(${kindLabel(node.kind)})* — ≈${node.tokens.toLocaleString()} tok (${node.percentOfTotal.toFixed(1)}%)`,
       );
     }
-    renderTreeMarkdown(node.children, depth + 1, lines);
+    renderTreeMarkdown(node.children, depth + 1, lines, homeDir, cwd);
   }
 }
 
 export function renderMarkdown(report: DoctorReport, options: RenderOptions = {}): string {
   const annotated = annotateTree(report.tree, report.totalTokens);
+  const { homeDir, cwd } = report;
   const out: string[] = [];
 
   out.push(`# claudemd-doctor report — \`${report.cwd}\``);
   out.push("");
   out.push(`_Generated ${report.generatedAt}. All token counts are ≈ offline estimates._`);
   out.push("");
+  out.push(renderSummaryLineMarkdown(report));
+  out.push("");
 
   out.push("## 1. Instruction tree");
   const treeLines: string[] = [];
-  renderTreeMarkdown(annotated, 0, treeLines);
+  renderTreeMarkdown(annotated, 0, treeLines, homeDir, cwd);
   out.push(...treeLines);
   out.push("");
   out.push(`**Total: ≈${report.totalTokens.toLocaleString()} tokens**`);
@@ -379,7 +457,7 @@ export function renderMarkdown(report: DoctorReport, options: RenderOptions = {}
     const n = report.measured?.sessionsScanned ?? 0;
     const shown = options.showAllRules ? report.unreferencedRules : report.unreferencedRules.slice(0, UNREFERENCED_PRETTY_LIMIT);
     for (const f of shown) {
-      out.push(`- \`${f.file}:${f.line}\` (≈${f.tokenCost} tok) — "${f.text.slice(0, 100)}" — never referenced in ${n} session(s)`);
+      out.push(`- \`${shortenPath(f.file, homeDir, cwd)}:${f.line}\` (≈${f.tokenCost} tok) — "${f.text.slice(0, 100)}" — never referenced in ${n} session(s)`);
     }
     const remaining = report.unreferencedRules.length - shown.length;
     if (remaining > 0) out.push(`- _+${remaining} more (use --all-rules or --json)_`);
@@ -391,10 +469,12 @@ export function renderMarkdown(report: DoctorReport, options: RenderOptions = {}
     out.push("None found.");
   } else {
     for (const c of report.conflicts) {
+      const aPath = shortenPath(c.a.file, homeDir, cwd);
+      const bPath = shortenPath(c.b.file, homeDir, cwd);
       if (c.kind === "duplicate") {
-        out.push(`- **Near-duplicate** (${(c.similarity * 100).toFixed(0)}%): \`${c.a.file}:${c.a.line}\` vs \`${c.b.file}:${c.b.line}\``);
+        out.push(`- **Near-duplicate** (${(c.similarity * 100).toFixed(0)}%): \`${aPath}:${c.a.line}\` vs \`${bPath}:${c.b.line}\``);
       } else {
-        out.push(`- **Polarity conflict** on \`${c.anchor}\`: \`${c.a.file}:${c.a.line}\` [${c.a.polarity}] vs \`${c.b.file}:${c.b.line}\` [${c.b.polarity}]`);
+        out.push(`- **Polarity conflict** on \`${c.anchor}\`: \`${aPath}:${c.a.line}\` [${c.a.polarity}] vs \`${bPath}:${c.b.line}\` [${c.b.polarity}]`);
       }
     }
   }

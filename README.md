@@ -11,6 +11,12 @@
 
 ![demo](docs/assets/demo.gif)
 
+```
+┌─ summary ────────────────────────────────────────
+│  ≈8,686 tokens re-sent every turn  ·  $65.01/mo cached ($104.23 uncached)  ·  18.6% never referenced  ·  1 conflict
+└──────────────────────────────────────────────────
+```
+
 ## Why
 
 Every turn in Claude Code re-sends your whole instruction chain — `CLAUDE.md`,
@@ -20,14 +26,18 @@ whether all of it is actually doing anything. On the bundled demo fixture
 (`npm run demo` — a synthetic, 30-session project, not a real one):
 
 - The instruction chain is **≈8,686 tokens**, re-sent on **every single turn**.
-- At 200 turns/day that's **≈$104/month** on Sonnet pricing, uncached.
+- At 200 turns/day that's **≈$65/month cached** (Claude Code caches the
+  instruction prefix, so this is the realistic number) — **≈$104/month** if
+  it never hit cache at all.
 - **18.6% of those tokens (≈1,618/turn)** come from rules that were never
-  referenced across 30 real sessions — four of them look exactly like the
-  "kept around just in case" rules every long-lived `CLAUDE.md` accumulates.
+  referenced across the demo's 30 synthetic sessions — four of them look
+  exactly like the "kept around just in case" rules every long-lived
+  `CLAUDE.md` accumulates.
 - It found a real conflict: one file says **"always use `npm`"**, another
   says **"never use `npm` — use `pnpm`"** — both loaded into context on every turn.
-- All of this runs **offline, in under a second**, against files already on
-  disk — no API key, no upload.
+- All of this runs locally in a few seconds on real transcript history
+  (under a second on the demo, which only has 30 sessions to scan) — no
+  API key, no upload.
 
 ## Quick start
 
@@ -71,6 +81,10 @@ Run it from inside any project. No config, no flags required.
 ```
 claudemd-doctor — <your project>
 
+┌─ summary ────────────────────────────────────────
+│  ≈8,686 tokens re-sent every turn  ·  $65.01/mo cached ($104.23 uncached)  ·  18.6% never referenced  ·  1 conflict
+└──────────────────────────────────────────────────
+
 1. Instruction tree (load order, ≈ tokens = offline estimate)
 ├── ~/.claude/CLAUDE.md [user] ≈224 tok 2.6%
 │   └── ~/.claude/shared.md [import] ≈128 tok 1.5%
@@ -97,10 +111,10 @@ Total: ≈8,686 tokens
 4. Unreferenced rules (never referenced in scanned transcripts — not a claim they're useless)
   ≈1,618 tokens/turn (18.6%) are rules never referenced in 30 sessions
 
-  rules/legacy-build-pipeline.md:3 ≈166 tok (under "Legacy Build Pipeline (pending removal)")
+  ~/.claude/rules/legacy-build-pipeline.md:3 ≈166 tok (under "Legacy Build Pipeline (pending removal)")
     "The old Grunt-based asset pipeline under `tools/legacy-grunt/` is kept only for the three downstream…"
     never referenced in 30 session(s)
-  rules/retired-api-migration.md:3 ≈152 tok (under "Retired API Migration Notes (v1 -> v2, ...)")
+  ~/.claude/rules/retired-api-migration.md:3 ≈152 tok (under "Retired API Migration Notes (v1 -> v2, ...)")
     "When the internal API moved from `/api/v1/` to `/api/v2/` three years ago, every client needed to ad…"
     never referenced in 30 session(s)
   ... (+23 more — use --all-rules or --json)
@@ -194,6 +208,12 @@ actually returned in your transcripts, not from re-estimating anything.
 machine — your instruction chain and your own Claude Code transcript
 history — and sends nothing anywhere. No network request, no telemetry, no
 account.
+
+Pretty and markdown output also shorten paths under your home directory to
+`~/...` and paths under the analyzed project to `./...`, so a screenshot or
+a pasted report doesn't carry your real username or full disk layout.
+`--json` keeps full absolute paths (a script parsing it shouldn't have to
+guess what `~` resolves to on your machine).
 
 ## FAQ
 

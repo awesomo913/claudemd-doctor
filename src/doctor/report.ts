@@ -9,6 +9,7 @@ import { findConflicts, type ConflictFinding } from "./conflicts.js";
 import { scanForDoctor, type MeasuredReality, type TurnDetail } from "./analyze.js";
 import { readFile } from "node:fs/promises";
 import { countTokens } from "../core/tokens.js";
+import { getHomeDir } from "../core/paths.js";
 import {
   DEFAULT_MODEL_ALIAS,
   getPricing,
@@ -107,6 +108,23 @@ export interface UnreferencedHeadline {
   sessionsScanned: number;
 }
 
+/**
+ * The one-line "money shot" summary shown at the top of every report mode.
+ * `monthlyCachedUsd` prefers the real measured cache-read reality (the
+ * average of `instructionReplay.pricedUsd` over its priced turns, scaled to
+ * turns-per-day) when transcripts were scanned; it falls back to the flat
+ * offline cache-read estimate otherwise. `monthlyCachedIsMeasured` tells
+ * callers which one they got.
+ */
+export interface ReportSummary {
+  chainTokens: number;
+  neverReferencedPercent: number | undefined;
+  conflictsCount: number;
+  monthlyCachedUsd: number | undefined;
+  monthlyCachedIsMeasured: boolean;
+  monthlyUncachedUsd: number | undefined;
+}
+
 export interface DoctorReportOptions {
   cwd: string;
   modelAlias: string;
@@ -128,6 +146,8 @@ export interface DoctorReportOptions {
 
 export interface DoctorReport {
   cwd: string;
+  /** Resolved home directory this report used (real $HOME, or --home/CLAUDEMD_DOCTOR_HOME). Pretty/markdown shorten paths under it to "~/...". */
+  homeDir: string;
   generatedAt: string;
   tree: TreeNode[];
   totalTokens: number;
@@ -148,6 +168,7 @@ export interface DoctorReport {
   transcriptsSkipped: boolean;
   /** Non-fatal problems while scanning transcripts (unreadable dirs, stat failures, ...). */
   transcriptWarnings: string[];
+  summary: ReportSummary;
 }
 
 /** Below this many scanned sessions, "never referenced" is too noisy to report (spec: require >= 20). */
@@ -237,6 +258,39 @@ function computeInstructionReplay(chainTokens: number, measured: MeasuredReality
     pricedUsd,
     unpricedTurns,
     unpricedModels: [...unpricedModels],
+  };
+}
+
+function computeSummary(
+  totalTokens: number,
+  cost: CostProjection | undefined,
+  instructionReplay: InstructionReplayCost | undefined,
+  measured: MeasuredReality | undefined,
+  unreferencedHeadline: UnreferencedHeadline | undefined,
+  conflictsCount: number,
+): ReportSummary {
+  let monthlyCachedUsd: number | undefined;
+  let monthlyCachedIsMeasured = false;
+
+  if (instructionReplay && measured && cost) {
+    const pricedTurns = measured.assistantTurns - instructionReplay.unpricedTurns;
+    if (pricedTurns > 0) {
+      const avgMeasuredUsdPerTurn = instructionReplay.pricedUsd / pricedTurns;
+      monthlyCachedUsd = avgMeasuredUsdPerTurn * cost.turnsPerDay * 30;
+      monthlyCachedIsMeasured = true;
+    }
+  }
+  if (monthlyCachedUsd === undefined) {
+    monthlyCachedUsd = cost?.perMonthCacheReadUsd;
+  }
+
+  return {
+    chainTokens: totalTokens,
+    neverReferencedPercent: unreferencedHeadline?.percentOfChain,
+    conflictsCount,
+    monthlyCachedUsd,
+    monthlyCachedIsMeasured,
+    monthlyUncachedUsd: cost?.perMonthUncachedUsd,
   };
 }
 
@@ -330,9 +384,11 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
   }
 
   const failOverExceeded = options.failOverTokens !== undefined && totalTokens > options.failOverTokens;
+  const summary = computeSummary(totalTokens, cost, instructionReplay, measured, unreferencedHeadline, conflicts.length);
 
   return {
     cwd: options.cwd,
+    homeDir: options.homeDir ?? getHomeDir(),
     generatedAt: new Date().toISOString(),
     tree: roots,
     totalTokens,
@@ -348,6 +404,7 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
     unmeasurableRules,
     conflicts,
     failOverExceeded,
+    summary,
     transcriptsSkipped: !options.includeTranscripts,
     transcriptWarnings,
   };
