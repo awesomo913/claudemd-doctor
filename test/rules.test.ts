@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkReferences, extractAnchors, splitIntoRules } from "../src/doctor/rules.js";
+import { checkReferences, extractAnchors, extractTechnicalAnchors, splitIntoRules } from "../src/doctor/rules.js";
 
 describe("splitIntoRules", () => {
   it("splits bullets under headings and folds indented continuation lines", () => {
@@ -54,6 +54,35 @@ describe("extractAnchors", () => {
 
   it("returns an empty list for text with no distinctive anchors", () => {
     expect(extractAnchors("just some ordinary prose with no special tokens")).toEqual([]);
+  });
+
+  it("drops generic ALL_CAPS structural words that are not real anchors", () => {
+    const anchors = extractAnchors("This is a HOT rule that applies to ALL cases AND every API call.");
+    expect(anchors).not.toContain("HOT");
+    expect(anchors).not.toContain("ALL");
+    expect(anchors).not.toContain("AND");
+    expect(anchors).not.toContain("API");
+  });
+});
+
+describe("extractTechnicalAnchors", () => {
+  it("keeps backticked single words, filenames, and paths", () => {
+    const anchors = extractTechnicalAnchors("Always use `pip` and read src/core/paths.ts before editing CONFIG.md");
+    expect(anchors).toContain("pip");
+    expect(anchors).toContain("CONFIG.md");
+    expect(anchors.some((a) => a.includes("paths.ts"))).toBe(true);
+  });
+
+  it("drops bare ALL_CAPS words and quoted prose phrases entirely, even backticked ones", () => {
+    const anchors = extractTechnicalAnchors('This is a HOT rule. See also "do the thing" and `ALL` cases.');
+    expect(anchors).not.toContain("HOT");
+    expect(anchors).not.toContain("do the thing");
+    expect(anchors).not.toContain("ALL");
+  });
+
+  it("drops a multi-word backticked phrase if any word in it is generic", () => {
+    const anchors = extractTechnicalAnchors("Run `npm all` before pushing");
+    expect(anchors).not.toContain("npm all");
   });
 });
 

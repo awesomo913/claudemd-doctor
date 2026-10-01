@@ -1,0 +1,1 @@
+{"type":"assistant","sessionId":"agent-1","cwd":"P:\\scoped","timestamp":"2026-01-01T00:05:00.000Z","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"synthetic subagent reply, should not be counted as a main session"}],"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}

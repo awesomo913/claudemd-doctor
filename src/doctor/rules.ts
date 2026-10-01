@@ -89,6 +89,26 @@ const FILENAME_RE = /\b[\w.-]+\.(?:md|ts|tsx|js|jsx|json|py|sh|ps1|yml|yaml|toml
 const PATHISH_RE = /\b(?:~[\\/])?[\w.-]+(?:[\\/][\w.-]+)+\b/g;
 
 /**
+ * Words that are too generic to ever be a trustworthy anchor — mostly
+ * ALL_CAPS structural markers (section labels like "HOT"/"WARM", common
+ * connectives like "AND"/"ALL") that real instruction files are full of.
+ * Filtered out everywhere anchors are used, so they never drive a false
+ * "referenced" match or a false conflict.
+ */
+const GENERIC_ANCHOR_BLOCKLIST = new Set([
+  "and", "all", "or", "any", "api", "hot", "warm", "cold", "readme", "next",
+  "must", "should", "shouldn't", "never", "always", "not", "no", "yes", "ok",
+  "ai", "cli", "gui", "http", "https", "url", "uri", "json", "yaml", "toml",
+  "todo", "fixme", "new", "get", "set", "use", "do", "don't", "stop", "go",
+  "the", "this", "that", "for", "with", "per", "via", "if", "else", "when",
+  "situational",
+]);
+
+function isGeneric(anchor: string): boolean {
+  return GENERIC_ANCHOR_BLOCKLIST.has(anchor.toLowerCase().trim());
+}
+
+/**
  * Pull distinctive anchors out of a rule's text: backticked tokens, quoted
  * phrases, ALL_CAPS words, filenames, and path-like tokens. These are the
  * strings we later look for in real transcript text to decide whether a
@@ -117,7 +137,36 @@ export function extractAnchors(text: string): string[] {
 
   // Drop anchors too short/common to be distinctive (would false-positive
   // against nearly any transcript).
-  return [...anchors].filter((a) => a.replace(/[^\w]/g, "").length >= 3);
+  return [...anchors].filter((a) => a.replace(/[^\w]/g, "").length >= 3 && !isGeneric(a));
+}
+
+/**
+ * Stricter anchor set used ONLY for conflict detection (duplicates and
+ * polarity). Real-world tuning: plain ALL_CAPS words and quoted prose
+ * phrases produced almost all the false-positive conflicts seen on real
+ * instruction chains ("AND", "ALL", "API", "HOT", "README" flagged as
+ * polarity anchors). Conflicts should only ever be raised on something
+ * genuinely technical: a backticked token, a filename, or a path — never a
+ * bare English word, even if it happens to be capitalized.
+ */
+export function extractTechnicalAnchors(text: string): string[] {
+  const anchors = new Set<string>();
+  for (const m of text.matchAll(BACKTICK_RE)) {
+    const v = m[1]?.trim();
+    if (v) anchors.add(v);
+  }
+  for (const m of text.matchAll(FILENAME_RE)) anchors.add(m[0]);
+  for (const m of text.matchAll(PATHISH_RE)) anchors.add(m[0]);
+
+  return [...anchors].filter((a) => {
+    const stripped = a.replace(/[^\w]/g, "");
+    if (stripped.length < 3) return false;
+    // A multi-word backticked phrase ("npm test") is fine as long as no
+    // individual word in it is generic; a single generic word is not.
+    const words = a.toLowerCase().split(/\s+/);
+    if (words.length === 1) return !isGeneric(a);
+    return !words.some((w) => isGeneric(w));
+  });
 }
 
 export interface ReferenceCheckResult {

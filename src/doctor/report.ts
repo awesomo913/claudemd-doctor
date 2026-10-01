@@ -6,12 +6,14 @@
 import { buildInstructionTree, flattenTree, type TreeNode } from "./discovery.js";
 import { splitIntoRules, type Rule } from "./rules.js";
 import { findConflicts, type ConflictFinding } from "./conflicts.js";
-import { scanForDoctor, checkRuleAgainstCorpus, type MeasuredReality } from "./analyze.js";
+import { scanForDoctor, checkRuleAgainstCorpus, type MeasuredReality, type TurnDetail } from "./analyze.js";
 import { readFile } from "node:fs/promises";
+import { countTokens } from "../core/tokens.js";
 import {
   DEFAULT_MODEL_ALIAS,
   getPricing,
-  PRICING_LAST_VERIFIED,
+  PRICING_SOURCE_URL,
+  PRICING_VERIFIED_DATE,
   type ModelPricing,
 } from "../core/pricing.js";
 
@@ -25,7 +27,28 @@ export interface CostProjection {
   per100TurnsCacheReadUsd: number;
   perMonthUncachedUsd: number;
   perMonthCacheReadUsd: number;
-  pricingLastVerified: string;
+  pricingSourceUrl: string;
+  pricingVerifiedDate: string;
+}
+
+/**
+ * The real, measured cost of re-sending the instruction chain every turn,
+ * computed from actual transcripts rather than the flat "totalTokens x
+ * price" estimate above. (a)-(d) match the four numbers the precision pass
+ * asked for.
+ */
+export interface InstructionReplayCost {
+  /** (a) assistant turns x chain tokens — the instructions re-sent, in tokens. */
+  instructionTokensResent: number;
+  /** (b) total measured input-side context (input + cache-write + cache-read) across scanned turns. */
+  totalInputContextTokens: number;
+  /** (c) chain tokens as a % of the average per-request context — undefined if there were 0 turns. */
+  avgInstructionsPercentOfRequest: number | undefined;
+  /** (d) $ for (a), priced per-turn using that turn's own model and cache-write/read split. */
+  pricedUsd: number;
+  /** Assistant turns whose recorded model has no pricing entry — never silently priced as another model. */
+  unpricedTurns: number;
+  unpricedModels: string[];
 }
 
 export interface RuleFinding {
@@ -34,6 +57,14 @@ export interface RuleFinding {
   heading: string | undefined;
   text: string;
   anchors: string[];
+  /** ≈tokens of this rule's own text — what the unreferenced-rules ranking sorts by. */
+  tokenCost: number;
+}
+
+export interface UnreferencedHeadline {
+  totalTokens: number;
+  percentOfChain: number;
+  sessionsScanned: number;
 }
 
 export interface DoctorReportOptions {
@@ -47,6 +78,8 @@ export interface DoctorReportOptions {
   failOverTokens: number | undefined;
   /** Override for testing — defaults to the real home directory. */
   homeDir?: string;
+  /** Override for testing — defaults to the real ~/.claude/projects. */
+  projectsDir?: string;
 }
 
 export interface DoctorReport {
@@ -58,12 +91,19 @@ export interface DoctorReport {
   cost: CostProjection | undefined;
   costError: string | undefined;
   measured: MeasuredReality | undefined;
+  instructionReplay: InstructionReplayCost | undefined;
   unreferencedRules: RuleFinding[];
+  unreferencedHeadline: UnreferencedHeadline | undefined;
+  /** Set when the unreferenced-rules check was skipped for not having enough session history. */
+  unreferencedSkippedReason: string | undefined;
   unmeasurableRules: RuleFinding[];
   conflicts: ConflictFinding[];
   failOverExceeded: boolean;
   transcriptsSkipped: boolean;
 }
+
+/** Below this many scanned sessions, "never referenced" is too noisy to report (spec: require >= 20). */
+const MIN_SESSIONS_FOR_UNREFERENCED_CHECK = 20;
 
 function computeCost(totalTokens: number, modelAlias: string, turnsPerDay: number): { cost?: CostProjection; error?: string } {
   const pricing = getPricing(modelAlias);
@@ -84,8 +124,71 @@ function computeCost(totalTokens: number, modelAlias: string, turnsPerDay: numbe
       per100TurnsCacheReadUsd: perTurnCacheReadUsd * 100,
       perMonthUncachedUsd: perTurnUncachedUsd * turnsPerDay * DAYS_PER_MONTH,
       perMonthCacheReadUsd: perTurnCacheReadUsd * turnsPerDay * DAYS_PER_MONTH,
-      pricingLastVerified: PRICING_LAST_VERIFIED,
+      pricingSourceUrl: PRICING_SOURCE_URL,
+      pricingVerifiedDate: PRICING_VERIFIED_DATE,
     },
+  };
+}
+
+/**
+ * Price one turn's share of the re-sent instruction chain using THAT turn's
+ * own recorded model and its own fresh/cache-write-5m/cache-write-1h/
+ * cache-read proportions. Returns undefined (never a silent sonnet-priced
+ * guess) when the turn's model has no pricing entry.
+ */
+function priceTurnInstructionResend(turn: TurnDetail, chainTokens: number): number | undefined {
+  const pricing = getPricing(turn.model ?? "");
+  if (!pricing) return undefined;
+
+  const turnTotal = turn.inputTokens + turn.cacheCreation5mInputTokens + turn.cacheCreation1hInputTokens + turn.cacheReadInputTokens;
+  if (turnTotal <= 0) {
+    // No usable split for this turn — fall back to pricing the whole resend
+    // as fresh input at this turn's model, rather than dropping it silently.
+    return (chainTokens / 1_000_000) * pricing.inputPerMTok;
+  }
+
+  const freshTokens = chainTokens * (turn.inputTokens / turnTotal);
+  const write5mTokens = chainTokens * (turn.cacheCreation5mInputTokens / turnTotal);
+  const write1hTokens = chainTokens * (turn.cacheCreation1hInputTokens / turnTotal);
+  const readTokens = chainTokens * (turn.cacheReadInputTokens / turnTotal);
+
+  return (
+    (freshTokens / 1_000_000) * pricing.inputPerMTok +
+    (write5mTokens / 1_000_000) * pricing.cacheWrite5mPerMTok +
+    (write1hTokens / 1_000_000) * pricing.cacheWrite1hPerMTok +
+    (readTokens / 1_000_000) * pricing.cacheReadPerMTok
+  );
+}
+
+function computeInstructionReplay(chainTokens: number, measured: MeasuredReality): InstructionReplayCost {
+  const totalInputContextTokens = measured.inputTokens + measured.cacheCreationInputTokens + measured.cacheReadInputTokens;
+  const instructionTokensResent = chainTokens * measured.assistantTurns;
+  const avgInstructionsPercentOfRequest =
+    measured.assistantTurns > 0 && totalInputContextTokens > 0
+      ? (chainTokens / (totalInputContextTokens / measured.assistantTurns)) * 100
+      : undefined;
+
+  let pricedUsd = 0;
+  let unpricedTurns = 0;
+  const unpricedModels = new Set<string>();
+
+  for (const turn of measured.turnDetails) {
+    const cost = priceTurnInstructionResend(turn, chainTokens);
+    if (cost === undefined) {
+      unpricedTurns += 1;
+      unpricedModels.add(turn.model ?? "(unknown model)");
+      continue;
+    }
+    pricedUsd += cost;
+  }
+
+  return {
+    instructionTokensResent,
+    totalInputContextTokens,
+    avgInstructionsPercentOfRequest,
+    pricedUsd,
+    unpricedTurns,
+    unpricedModels: [...unpricedModels],
   };
 }
 
@@ -117,8 +220,11 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
   const { cost, error: costError } = computeCost(totalTokens, options.modelAlias, options.turnsPerDay);
 
   let measured: MeasuredReality | undefined;
+  let instructionReplay: InstructionReplayCost | undefined;
   let unreferencedRules: RuleFinding[] = [];
   let unmeasurableRules: RuleFinding[] = [];
+  let unreferencedHeadline: UnreferencedHeadline | undefined;
+  let unreferencedSkippedReason: string | undefined;
   const rules = await collectRules(roots, warnings);
   const conflicts = findConflicts(rules);
 
@@ -127,20 +233,37 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
       cwd: options.cwd,
       all: options.all,
       maxSessions: options.maxSessions,
+      projectsDir: options.projectsDir,
     });
     measured = reality;
+    instructionReplay = computeInstructionReplay(totalTokens, reality);
 
-    for (const rule of rules) {
-      const status = checkRuleAgainstCorpus(rule.anchors, corpus);
-      const finding: RuleFinding = {
-        file: rule.file,
-        line: rule.line,
-        heading: rule.heading,
-        text: rule.text,
-        anchors: rule.anchors,
+    if (reality.sessionsScanned < MIN_SESSIONS_FOR_UNREFERENCED_CHECK) {
+      unreferencedSkippedReason = `not enough history (${reality.sessionsScanned} session${reality.sessionsScanned === 1 ? "" : "s"}) — skipped`;
+    } else {
+      const findings: RuleFinding[] = [];
+      for (const rule of rules) {
+        const status = checkRuleAgainstCorpus(rule.anchors, corpus);
+        const finding: RuleFinding = {
+          file: rule.file,
+          line: rule.line,
+          heading: rule.heading,
+          text: rule.text,
+          anchors: rule.anchors,
+          tokenCost: countTokens(rule.text),
+        };
+        if (status.unmeasurable) unmeasurableRules.push(finding);
+        else if (!status.referenced) findings.push(finding);
+      }
+      findings.sort((a, b) => b.tokenCost - a.tokenCost);
+      unreferencedRules = findings;
+
+      const totalUnreferencedTokens = findings.reduce((sum, f) => sum + f.tokenCost, 0);
+      unreferencedHeadline = {
+        totalTokens: totalUnreferencedTokens,
+        percentOfChain: totalTokens > 0 ? (totalUnreferencedTokens / totalTokens) * 100 : 0,
+        sessionsScanned: reality.sessionsScanned,
       };
-      if (status.unmeasurable) unmeasurableRules.push(finding);
-      else if (!status.referenced) unreferencedRules.push(finding);
     }
   }
 
@@ -155,7 +278,10 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
     cost,
     costError,
     measured,
+    instructionReplay,
     unreferencedRules,
+    unreferencedHeadline,
+    unreferencedSkippedReason,
     unmeasurableRules,
     conflicts,
     failOverExceeded,

@@ -18,6 +18,7 @@ Options:
   --no-transcripts       Skip the measured-reality / unreferenced-rules scan entirely
   --agents               Also show AGENTS.md (Codex) / GEMINI.md chains for comparison
   --fail-over <tokens>   Exit 1 if the instruction tree exceeds this many ≈tokens
+  --all-rules            Pretty/markdown mode: show every unreferenced rule, not just the top 10
   -h, --help             Show this help
 `;
 
@@ -32,6 +33,7 @@ interface CliArgs {
   "no-transcripts"?: boolean;
   agents?: boolean;
   "fail-over"?: string;
+  "all-rules"?: boolean;
   help?: boolean;
 }
 
@@ -60,6 +62,7 @@ async function main(): Promise<void> {
         "no-transcripts": { type: "boolean" },
         agents: { type: "boolean" },
         "fail-over": { type: "string" },
+        "all-rules": { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
       allowPositionals: false,
@@ -102,12 +105,14 @@ async function main(): Promise<void> {
     failOverTokens,
   });
 
+  const renderOptions = { showAllRules: Boolean(values["all-rules"]) };
+
   if (values.json) {
     process.stdout.write(`${renderJson(report)}\n`);
   } else if (values.markdown) {
-    process.stdout.write(`${renderMarkdown(report)}\n`);
+    process.stdout.write(`${renderMarkdown(report, renderOptions)}\n`);
   } else {
-    process.stdout.write(`${renderPretty(report)}\n`);
+    process.stdout.write(`${renderPretty(report, renderOptions)}\n`);
   }
 
   if (report.failOverExceeded) {

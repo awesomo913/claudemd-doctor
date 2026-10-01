@@ -21,7 +21,12 @@ export interface ToolUseEvent {
 
 export interface UsageEvent {
   inputTokens: number;
+  /** Sum of the two ephemeral cache-write buckets below. */
   cacheCreationInputTokens: number;
+  /** Cache-write tokens billed at the 5-minute TTL rate. */
+  cacheCreation5mInputTokens: number;
+  /** Cache-write tokens billed at the 1-hour TTL rate. */
+  cacheCreation1hInputTokens: number;
   cacheReadInputTokens: number;
   outputTokens: number;
 }
@@ -95,6 +100,10 @@ interface ClaudeMessage {
     cache_creation_input_tokens?: number;
     cache_read_input_tokens?: number;
     output_tokens?: number;
+    cache_creation?: {
+      ephemeral_5m_input_tokens?: number;
+      ephemeral_1h_input_tokens?: number;
+    };
   };
 }
 
@@ -177,6 +186,8 @@ export class ClaudeCodeAdapter implements TranscriptAdapter {
         ? {
             inputTokens: msg.usage.input_tokens ?? 0,
             cacheCreationInputTokens: msg.usage.cache_creation_input_tokens ?? 0,
+            cacheCreation5mInputTokens: msg.usage.cache_creation?.ephemeral_5m_input_tokens ?? 0,
+            cacheCreation1hInputTokens: msg.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
             cacheReadInputTokens: msg.usage.cache_read_input_tokens ?? 0,
             outputTokens: msg.usage.output_tokens ?? 0,
           }
@@ -350,6 +361,13 @@ async function statMtimeMs(file: string): Promise<number> {
   }
 }
 
+/** Sort files newest-first by mtime. Shared by the global and scoped scan paths. */
+export async function sortFilesNewestFirst(files: string[]): Promise<string[]> {
+  const withMtime = await Promise.all(files.map(async (f) => ({ file: f, mtime: await statMtimeMs(f) })));
+  withMtime.sort((a, b) => b.mtime - a.mtime);
+  return withMtime.map((x) => x.file);
+}
+
 /**
  * Discover and stream events from every session file an adapter finds,
  * newest-first, capped at `maxSessions` files. Malformed lines are counted
@@ -360,12 +378,9 @@ export async function scanTranscripts(
   options: ScanOptions = {},
 ): Promise<TranscriptScanResult> {
   const allFiles = await adapter.discoverFiles();
-  const withMtime = await Promise.all(
-    allFiles.map(async (f) => ({ file: f, mtime: await statMtimeMs(f) })),
-  );
-  withMtime.sort((a, b) => b.mtime - a.mtime);
+  const sorted = await sortFilesNewestFirst(allFiles);
   const limit = options.maxSessions ?? allFiles.length;
-  const chosen = withMtime.slice(0, limit).map((x) => x.file);
+  const chosen = sorted.slice(0, limit);
 
   const malformed: MalformedLine[] = [];
 
@@ -376,4 +391,56 @@ export async function scanTranscripts(
   }
 
   return { events: iterate(), malformed, filesScanned: chosen };
+}
+
+// ---------------------------------------------------------------------------
+// Scoped-by-project-slug discovery (Claude Code only)
+//
+// The doctor's default (non-"--all") mode should look directly at
+// ~/.claude/projects/<slug>/ instead of scanning the newest N files across
+// every project on the machine and then filtering by cwd — the latter
+// starves small/quiet projects of their own history once the machine has
+// thousands of sessions elsewhere. --all keeps the cross-project behavior
+// via ClaudeCodeAdapter.discoverFiles() + scanTranscripts() above.
+// ---------------------------------------------------------------------------
+
+/** Every *.jsonl session file directly inside one project's slug directory (not recursive). */
+export async function discoverSlugSessionFiles(
+  slug: string,
+  projectsDir: string = claudeProjectsDir(),
+): Promise<string[]> {
+  const dir = path.join(projectsDir, slug);
+  if (!existsSync(dir)) return [];
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  return entries.filter((e) => e.isFile() && e.name.endsWith(".jsonl")).map((e) => path.join(dir, e.name));
+}
+
+/** Every *.jsonl file under <slug>/subagents/**, recursively. Counted separately from main sessions. */
+export async function discoverSlugSubagentFiles(
+  slug: string,
+  projectsDir: string = claudeProjectsDir(),
+): Promise<string[]> {
+  const dir = path.join(projectsDir, slug, "subagents");
+  if (!existsSync(dir)) return [];
+  const out: string[] = [];
+  async function walk(d: string): Promise<void> {
+    const entries = await readdir(d, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        out.push(full);
+      }
+    }
+  }
+  await walk(dir);
+  return out;
+}
+
+/** List every project slug directory under ~/.claude/projects (for --all's subagent count). */
+export async function listProjectSlugs(projectsDir: string = claudeProjectsDir()): Promise<string[]> {
+  if (!existsSync(projectsDir)) return [];
+  const entries = await readdir(projectsDir, { withFileTypes: true }).catch(() => []);
+  return entries.filter((e) => e.isDirectory()).map((e) => e.name);
 }

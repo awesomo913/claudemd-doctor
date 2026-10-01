@@ -8,6 +8,13 @@ import type { DoctorReport, RuleFinding } from "./report.js";
 import type { TreeNode } from "./discovery.js";
 import type { ConflictFinding } from "./conflicts.js";
 
+export interface RenderOptions {
+  /** --all-rules: show every unreferenced rule in pretty mode instead of the top 10. */
+  showAllRules?: boolean;
+}
+
+const UNREFERENCED_PRETTY_LIMIT = 10;
+
 // ---------------------------------------------------------------------------
 // Shared: annotate tree nodes with subtree totals + % of grand total.
 // ---------------------------------------------------------------------------
@@ -34,6 +41,24 @@ export function annotateTree(nodes: TreeNode[], grandTotal: number): AnnotatedNo
   });
 }
 
+/**
+ * Money formatting (precision fix): amounts under $1 are shown to 3
+ * significant figures (e.g. "$0.0258", never rounded down to "$0.03") so a
+ * per-turn cost doesn't collapse to noise. Amounts >= $1 use plain 2
+ * decimal places, which is already enough significant figures for that
+ * range.
+ */
+export function formatUsd(n: number): string {
+  if (n === 0) return "$0";
+  if (Math.abs(n) < 1) {
+    const precise = n.toPrecision(3);
+    // toPrecision can return exponential notation for very small numbers
+    // (e.g. "1.23e-6") — leave that as-is rather than mangling it further.
+    return `$${precise}`;
+  }
+  return `$${n.toFixed(2)}`;
+}
+
 // ---------------------------------------------------------------------------
 // JSON
 // ---------------------------------------------------------------------------
@@ -41,7 +66,7 @@ export function annotateTree(nodes: TreeNode[], grandTotal: number): AnnotatedNo
 export function renderJson(report: DoctorReport): string {
   const annotated = annotateTree(report.tree, report.totalTokens);
   const payload = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     cwd: report.cwd,
     generatedAt: report.generatedAt,
     tree: annotated,
@@ -50,8 +75,11 @@ export function renderJson(report: DoctorReport): string {
     cost: report.cost,
     costError: report.costError,
     measuredReality: report.measured ?? null,
+    instructionReplay: report.instructionReplay ?? null,
     transcriptsSkipped: report.transcriptsSkipped,
     unreferencedRules: report.unreferencedRules,
+    unreferencedHeadline: report.unreferencedHeadline ?? null,
+    unreferencedSkippedReason: report.unreferencedSkippedReason ?? null,
     unmeasurableRules: report.unmeasurableRules,
     conflicts: report.conflicts,
     failOverExceeded: report.failOverExceeded,
@@ -95,15 +123,10 @@ function renderTreeLines(nodes: AnnotatedNode[], prefix: string, lines: string[]
   });
 }
 
-function formatUsd(n: number): string {
-  if (n < 0.01) return `$${n.toFixed(4)}`;
-  return `$${n.toFixed(2)}`;
-}
-
 function renderRuleFinding(f: RuleFinding, sessionsNote: string): string {
   const head = f.heading ? pc.dim(` (under "${f.heading}")`) : "";
   const truncated = f.text.length > 100 ? `${f.text.slice(0, 100)}…` : f.text;
-  return `  ${pc.dim(`${f.file}:${f.line}`)}${head}\n    "${truncated}"\n    ${pc.dim(sessionsNote)}`;
+  return `  ${pc.dim(`${f.file}:${f.line}`)} ${pc.cyan(`≈${f.tokenCost} tok`)}${head}\n    "${truncated}"\n    ${pc.dim(sessionsNote)}`;
 }
 
 function renderConflict(c: ConflictFinding): string {
@@ -121,7 +144,39 @@ function renderConflict(c: ConflictFinding): string {
   );
 }
 
-export function renderPretty(report: DoctorReport): string {
+function renderMeasuredRealityLines(report: DoctorReport, out: string[]): void {
+  if (report.transcriptsSkipped) {
+    out.push(`  ${pc.dim("skipped (--no-transcripts)")}`);
+    return;
+  }
+  const m = report.measured;
+  if (!m) return;
+
+  out.push(
+    `  Sessions: ${m.sessionsAvailable.toLocaleString()} exist, ${m.sessionsScanned.toLocaleString()} scanned` +
+      (m.subagentSessionsAvailable > 0 ? ` (+ ${m.subagentSessionsAvailable.toLocaleString()} subagent sessions, counted separately)` : ""),
+  );
+  out.push(`  Assistant turns in scanned sessions: ${m.assistantTurns.toLocaleString()}`);
+  if (m.malformedLineCount > 0) {
+    out.push(`  ${pc.yellow(`${m.malformedLineCount} malformed line(s) skipped while scanning`)}`);
+  }
+
+  const r = report.instructionReplay;
+  if (!r) return;
+  out.push("");
+  out.push(`  (a) Instruction tokens re-sent ≈ ${m.assistantTurns} turns × ≈${report.totalTokens.toLocaleString()} chain tok ≈ ${r.instructionTokensResent.toLocaleString()} tok`);
+  out.push(`  (b) Total measured input-side context across those turns: ${r.totalInputContextTokens.toLocaleString()} tok`);
+  out.push(
+    `  (c) Instructions are ≈${r.avgInstructionsPercentOfRequest !== undefined ? `${r.avgInstructionsPercentOfRequest.toFixed(1)}%` : "n/a"} of the average request`,
+  );
+  const pricedNote =
+    r.unpricedTurns > 0
+      ? pc.yellow(` (${r.unpricedTurns} turn(s) on unpriced model(s) [${r.unpricedModels.join(", ")}] excluded)`)
+      : "";
+  out.push(`  (d) $ for (a), priced per-turn by that turn's own model: ${formatUsd(r.pricedUsd)}${pricedNote}`);
+}
+
+export function renderPretty(report: DoctorReport, options: RenderOptions = {}): string {
   const annotated = annotateTree(report.tree, report.totalTokens);
   const out: string[] = [];
 
@@ -139,7 +194,10 @@ export function renderPretty(report: DoctorReport): string {
   }
 
   out.push("");
-  out.push(pc.bold("2. Cost") + pc.dim(` (offline estimate, pricing last verified ${report.cost?.pricingLastVerified ?? "n/a"})`));
+  out.push(
+    pc.bold("2. Cost") +
+      pc.dim(` (offline estimate; pricing verified ${report.cost?.pricingVerifiedDate ?? "n/a"} @ ${report.cost?.pricingSourceUrl ?? "n/a"})`),
+  );
   if (report.cost) {
     const c = report.cost;
     out.push(`  Model: ${c.model.id} (alias: ${c.model.alias})`);
@@ -152,32 +210,35 @@ export function renderPretty(report: DoctorReport): string {
 
   out.push("");
   out.push(pc.bold("3. Measured reality") + pc.dim(" (from real transcripts)"));
-  if (report.transcriptsSkipped) {
-    out.push(`  ${pc.dim("skipped (--no-transcripts)")}`);
-  } else if (report.measured) {
-    const m = report.measured;
-    const totalRealTokens = m.inputTokens + m.cacheCreationInputTokens + m.cacheReadInputTokens;
-    out.push(`  Sessions matched: ${m.sessionsFound}  (of ${m.filesScanned} files scanned)`);
-    out.push(`  Your instructions were sent ${m.assistantTurns} times ≈ ${totalRealTokens.toLocaleString()} input-side tokens`);
-    out.push(`  Real usage — input: ${m.inputTokens.toLocaleString()}  cache-write: ${m.cacheCreationInputTokens.toLocaleString()}  cache-read: ${m.cacheReadInputTokens.toLocaleString()}  output: ${m.outputTokens.toLocaleString()}`);
-    if (m.malformedLineCount > 0) {
-      out.push(`  ${pc.yellow(`${m.malformedLineCount} malformed line(s) skipped while scanning`)}`);
-    }
-  }
+  renderMeasuredRealityLines(report, out);
 
   out.push("");
   out.push(pc.bold("4. Unreferenced rules") + pc.dim(" (never referenced in scanned transcripts — not a claim they're useless)"));
   if (report.transcriptsSkipped) {
     out.push(`  ${pc.dim("skipped (--no-transcripts)")}`);
+  } else if (report.unreferencedSkippedReason) {
+    out.push(`  ${pc.dim(report.unreferencedSkippedReason)}`);
   } else if (report.unreferencedRules.length === 0) {
     out.push(`  ${pc.green("none found")}`);
   } else {
-    const n = report.measured?.sessionsFound ?? 0;
-    for (const f of report.unreferencedRules) {
+    const h = report.unreferencedHeadline;
+    if (h) {
+      out.push(
+        pc.bold(`  ≈${h.totalTokens.toLocaleString()} tokens/turn (${h.percentOfChain.toFixed(1)}%) are rules never referenced in ${h.sessionsScanned} sessions`),
+      );
+      out.push("");
+    }
+    const n = report.measured?.sessionsScanned ?? 0;
+    const shown = options.showAllRules ? report.unreferencedRules : report.unreferencedRules.slice(0, UNREFERENCED_PRETTY_LIMIT);
+    for (const f of shown) {
       out.push(renderRuleFinding(f, `never referenced in ${n} session(s)`));
     }
+    const remaining = report.unreferencedRules.length - shown.length;
+    if (remaining > 0) {
+      out.push(`  ${pc.dim(`+${remaining} more (use --all-rules or --json)`)}`);
+    }
   }
-  if (!report.transcriptsSkipped && report.unmeasurableRules.length > 0) {
+  if (!report.transcriptsSkipped && !report.unreferencedSkippedReason && report.unmeasurableRules.length > 0) {
     out.push(`  ${pc.dim(`${report.unmeasurableRules.length} rule(s) unmeasurable (no extractable anchors)`)}`);
   }
 
@@ -215,7 +276,7 @@ function renderTreeMarkdown(nodes: AnnotatedNode[], depth: number, lines: string
   }
 }
 
-export function renderMarkdown(report: DoctorReport): string {
+export function renderMarkdown(report: DoctorReport, options: RenderOptions = {}): string {
   const annotated = annotateTree(report.tree, report.totalTokens);
   const out: string[] = [];
 
@@ -240,7 +301,7 @@ export function renderMarkdown(report: DoctorReport): string {
   out.push("## 2. Cost");
   if (report.cost) {
     const c = report.cost;
-    out.push(`Model: \`${c.model.id}\` (pricing last verified ${c.pricingLastVerified})`);
+    out.push(`Model: \`${c.model.id}\` (pricing verified ${c.pricingVerifiedDate} at <${c.pricingSourceUrl}>)`);
     out.push("");
     out.push("| | Uncached | Cache-read |");
     out.push("|---|---|---|");
@@ -257,23 +318,39 @@ export function renderMarkdown(report: DoctorReport): string {
     out.push("_skipped (`--no-transcripts`)_");
   } else if (report.measured) {
     const m = report.measured;
-    out.push(`- Sessions matched: ${m.sessionsFound} (of ${m.filesScanned} files scanned)`);
-    out.push(`- Instructions sent ${m.assistantTurns} times`);
-    out.push(`- Real tokens — input: ${m.inputTokens.toLocaleString()}, cache-write: ${m.cacheCreationInputTokens.toLocaleString()}, cache-read: ${m.cacheReadInputTokens.toLocaleString()}, output: ${m.outputTokens.toLocaleString()}`);
+    out.push(`- Sessions: ${m.sessionsAvailable} exist, ${m.sessionsScanned} scanned${m.subagentSessionsAvailable > 0 ? ` (+ ${m.subagentSessionsAvailable} subagent sessions, counted separately)` : ""}`);
+    out.push(`- Assistant turns in scanned sessions: ${m.assistantTurns}`);
     if (m.malformedLineCount > 0) out.push(`- ${m.malformedLineCount} malformed line(s) skipped`);
+    const r = report.instructionReplay;
+    if (r) {
+      out.push(`- (a) Instruction tokens re-sent ≈ ${r.instructionTokensResent.toLocaleString()} tok`);
+      out.push(`- (b) Total measured input-side context: ${r.totalInputContextTokens.toLocaleString()} tok`);
+      out.push(`- (c) Instructions ≈${r.avgInstructionsPercentOfRequest !== undefined ? `${r.avgInstructionsPercentOfRequest.toFixed(1)}%` : "n/a"} of the average request`);
+      out.push(
+        `- (d) $ for (a), priced per-turn by model: ${formatUsd(r.pricedUsd)}${r.unpricedTurns > 0 ? ` (${r.unpricedTurns} turn(s) on unpriced model(s) [${r.unpricedModels.join(", ")}] excluded)` : ""}`,
+      );
+    }
   }
 
   out.push("");
   out.push("## 4. Unreferenced rules");
   if (report.transcriptsSkipped) {
     out.push("_skipped (`--no-transcripts`)_");
+  } else if (report.unreferencedSkippedReason) {
+    out.push(`_${report.unreferencedSkippedReason}_`);
   } else if (report.unreferencedRules.length === 0) {
     out.push("None found.");
   } else {
-    const n = report.measured?.sessionsFound ?? 0;
-    for (const f of report.unreferencedRules) {
-      out.push(`- \`${f.file}:${f.line}\` — "${f.text.slice(0, 100)}" — never referenced in ${n} session(s)`);
+    const h = report.unreferencedHeadline;
+    if (h) out.push(`**≈${h.totalTokens.toLocaleString()} tokens/turn (${h.percentOfChain.toFixed(1)}%) are rules never referenced in ${h.sessionsScanned} sessions**`);
+    out.push("");
+    const n = report.measured?.sessionsScanned ?? 0;
+    const shown = options.showAllRules ? report.unreferencedRules : report.unreferencedRules.slice(0, UNREFERENCED_PRETTY_LIMIT);
+    for (const f of shown) {
+      out.push(`- \`${f.file}:${f.line}\` (≈${f.tokenCost} tok) — "${f.text.slice(0, 100)}" — never referenced in ${n} session(s)`);
     }
+    const remaining = report.unreferencedRules.length - shown.length;
+    if (remaining > 0) out.push(`- _+${remaining} more (use --all-rules or --json)_`);
   }
 
   out.push("");

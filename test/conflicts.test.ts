@@ -11,9 +11,15 @@ describe("findDuplicates", () => {
     expect(dups[0]?.similarity).toBeGreaterThanOrEqual(0.85);
   });
 
-  it("does not flag unrelated rules", () => {
-    const rulesA = splitIntoRules("- Never commit secrets to the repository", "A.md");
-    const rulesB = splitIntoRules("- Always write small focused functions", "B.md");
+  it("does not flag unrelated rules, even when both clear the prose-word floor", () => {
+    const rulesA = splitIntoRules(
+      "- Never commit secrets or credentials of any kind to the shared repository",
+      "A.md",
+    );
+    const rulesB = splitIntoRules(
+      "- Always write small, clearly named, single purpose helper functions for every module",
+      "B.md",
+    );
     const dups = findDuplicates([...rulesA, ...rulesB]);
     expect(dups).toHaveLength(0);
   });
@@ -21,6 +27,19 @@ describe("findDuplicates", () => {
   it("skips very short rules to avoid trivial false positives", () => {
     const rulesA = splitIntoRules("- Use uv", "A.md");
     const rulesB = splitIntoRules("- Use uv", "B.md");
+    const dups = findDuplicates([...rulesA, ...rulesB]);
+    expect(dups).toHaveLength(0);
+  });
+
+  it("ignores lines that are mostly code/paths, like a template-path table row", () => {
+    const rulesA = splitIntoRules(
+      "- `src/core/paths.ts` `src/core/tokens.ts` `src/core/pricing.ts` `src/doctor/report.ts`",
+      "A.md",
+    );
+    const rulesB = splitIntoRules(
+      "- `src/doctor/render.ts` `src/doctor/rules.ts` `src/doctor/conflicts.ts` `src/cli.ts`",
+      "B.md",
+    );
     const dups = findDuplicates([...rulesA, ...rulesB]);
     expect(dups).toHaveLength(0);
   });
@@ -39,6 +58,18 @@ describe("findPolarityConflicts", () => {
   it("does not flag two rules that agree in polarity", () => {
     const rulesA = splitIntoRules("- Always use `pip install` for Python packages", "A.md");
     const rulesB = splitIntoRules("- You must use `pip install` in CI too", "B.md");
+    const conflicts = findPolarityConflicts([...rulesA, ...rulesB]);
+    expect(conflicts).toHaveLength(0);
+  });
+
+  it("treats a leading ❌ anti-pattern marker as negative for the whole bullet, even past a trailing 'always'", () => {
+    // Real false-positive found on a live instruction chain: an anti-pattern
+    // bullet phrased "❌ do X — always do Y instead" was misread as
+    // POSITIVE toward the shared path anchor because "always" sits right
+    // next to it, conflicting with an unrelated, genuinely negative rule
+    // about a different aspect of the same path.
+    const rulesA = splitIntoRules("- **Never** ship raw output to `shared/output/` directly", "A.md");
+    const rulesB = splitIntoRules("- ❌ Output to `dist/` and forget — always move to `shared/output/`", "B.md");
     const conflicts = findPolarityConflicts([...rulesA, ...rulesB]);
     expect(conflicts).toHaveLength(0);
   });
