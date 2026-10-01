@@ -1,9 +1,30 @@
 {
   "name": "claudemd-doctor",
   "version": "0.1.0",
-  "description": "See what your CLAUDE.md costs you on every single turn — and which rules never pull their weight.",
+  "description": "Audit your CLAUDE.md: real token cost per turn, dead rules, and conflicts for Claude Code. Offline, no API key.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "claude-md",
+    "tokens",
+    "cost",
+    "llm",
+    "ai-agents",
+    "anthropic",
+    "cli",
+    "context-window"
+  ],
   "license": "MIT",
   "type": "module",
+  "homepage": "https://github.com/awesomo913/claudemd-doctor#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/awesomo913/claudemd-doctor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/awesomo913/claudemd-doctor/issues"
+  },
+  "author": "awesomo913",
   "engines": {
     "node": ">=20"
   },
