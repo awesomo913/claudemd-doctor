@@ -51,6 +51,46 @@ export interface InstructionReplayCost {
   unpricedModels: string[];
 }
 
+/**
+ * Per-model rollup of real usage, shown instead of the full per-turn detail
+ * in default --json output. 19,525 individual turn objects is a lot of
+ * bytes for a CLI report to emit by default; the aggregate is what most
+ * consumers actually want, and `--verbose` still exposes the raw turns.
+ */
+export interface PerModelUsage {
+  model: string;
+  turns: number;
+  inputTokens: number;
+  cacheCreation5mInputTokens: number;
+  cacheCreation1hInputTokens: number;
+  cacheReadInputTokens: number;
+  outputTokens: number;
+}
+
+function aggregateByModel(turnDetails: TurnDetail[]): PerModelUsage[] {
+  const byModel = new Map<string, PerModelUsage>();
+  for (const turn of turnDetails) {
+    const key = turn.model ?? "(unknown model)";
+    const row = byModel.get(key) ?? {
+      model: key,
+      turns: 0,
+      inputTokens: 0,
+      cacheCreation5mInputTokens: 0,
+      cacheCreation1hInputTokens: 0,
+      cacheReadInputTokens: 0,
+      outputTokens: 0,
+    };
+    row.turns += 1;
+    row.inputTokens += turn.inputTokens;
+    row.cacheCreation5mInputTokens += turn.cacheCreation5mInputTokens;
+    row.cacheCreation1hInputTokens += turn.cacheCreation1hInputTokens;
+    row.cacheReadInputTokens += turn.cacheReadInputTokens;
+    row.outputTokens += turn.outputTokens;
+    byModel.set(key, row);
+  }
+  return [...byModel.values()].sort((a, b) => b.turns - a.turns);
+}
+
 export interface RuleFinding {
   file: string;
   line: number;
@@ -95,6 +135,8 @@ export interface DoctorReport {
   cost: CostProjection | undefined;
   costError: string | undefined;
   measured: MeasuredReality | undefined;
+  /** Per-model usage rollup — always present when transcripts were scanned; full per-turn detail is --verbose-only. */
+  perModelUsage: PerModelUsage[] | undefined;
   instructionReplay: InstructionReplayCost | undefined;
   unreferencedRules: RuleFinding[];
   unreferencedHeadline: UnreferencedHeadline | undefined;
@@ -226,6 +268,7 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
   const { cost, error: costError } = computeCost(totalTokens, options.modelAlias, options.turnsPerDay);
 
   let measured: MeasuredReality | undefined;
+  let perModelUsage: PerModelUsage[] | undefined;
   let instructionReplay: InstructionReplayCost | undefined;
   let unreferencedRules: RuleFinding[] = [];
   let unmeasurableRules: RuleFinding[] = [];
@@ -246,6 +289,7 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
     });
     measured = reality;
     transcriptWarnings = reality.warnings;
+    perModelUsage = aggregateByModel(reality.turnDetails);
     instructionReplay = computeInstructionReplay(totalTokens, reality);
 
     if (reality.sessionsScanned < MIN_SESSIONS_FOR_UNREFERENCED_CHECK) {
@@ -296,6 +340,7 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
     cost,
     costError,
     measured,
+    perModelUsage,
     instructionReplay,
     unreferencedRules,
     unreferencedHeadline,

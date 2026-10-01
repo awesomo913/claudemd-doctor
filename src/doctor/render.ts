@@ -11,6 +11,8 @@ import type { ConflictFinding } from "./conflicts.js";
 export interface RenderOptions {
   /** --all-rules: show every unreferenced rule in pretty mode instead of the top 10. */
   showAllRules?: boolean;
+  /** --verbose: JSON mode only — include the full per-turn detail array (can be tens of thousands of entries). */
+  verbose?: boolean;
 }
 
 const UNREFERENCED_PRETTY_LIMIT = 10;
@@ -63,10 +65,23 @@ export function formatUsd(n: number): string {
 // JSON
 // ---------------------------------------------------------------------------
 
-export function renderJson(report: DoctorReport): string {
+/**
+ * JSON size fix: `measuredReality.turnDetails` is one object per assistant
+ * turn — 19,525 of them on a real chain — which makes default --json
+ * output huge for no good reason, since `perModelUsage` (always present)
+ * already answers "how much, on which model" for everyone who isn't
+ * debugging turn-by-turn. The full array is kept, but only under
+ * `--verbose`.
+ */
+export function renderJson(report: DoctorReport, options: RenderOptions = {}): string {
   const annotated = annotateTree(report.tree, report.totalTokens);
+  const measuredReality = report.measured
+    ? options.verbose
+      ? report.measured
+      : { ...report.measured, turnDetails: undefined }
+    : null;
   const payload = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     cwd: report.cwd,
     generatedAt: report.generatedAt,
     tree: annotated,
@@ -75,7 +90,8 @@ export function renderJson(report: DoctorReport): string {
     transcriptWarnings: report.transcriptWarnings,
     cost: report.cost,
     costError: report.costError,
-    measuredReality: report.measured ?? null,
+    measuredReality,
+    perModelUsage: report.perModelUsage ?? null,
     instructionReplay: report.instructionReplay ?? null,
     transcriptsSkipped: report.transcriptsSkipped,
     unreferencedRules: report.unreferencedRules,
