@@ -188,3 +188,86 @@ export function checkReferences(anchors: string[], corpus: string): ReferenceChe
     referenced: haystack.includes(anchor.toLowerCase()),
   }));
 }
+
+interface TrieNode {
+  children: Map<string, TrieNode>;
+  fail: TrieNode | null;
+  /** Patterns that end at this node, including everything inherited via fail links. */
+  output: string[];
+}
+
+/**
+ * Builds an Aho-Corasick automaton: a trie of every pattern plus
+ * precomputed "fail" links (where to fall back to on a mismatch, without
+ * ever re-reading already-consumed text). A plain regex alternation
+ * (`a|b|c|...`) was tried first and measured SLOWER than the original
+ * per-anchor `.includes()` loop — V8 doesn't compile a large literal
+ * alternation into an efficient multi-pattern matcher, it just tries each
+ * alternative in turn at every position. Aho-Corasick is the real
+ * multi-pattern algorithm: one pass over the corpus regardless of how many
+ * patterns there are, and — unlike a non-overlapping regex scan — it finds
+ * every occurrence of every pattern, including ones that are substrings of
+ * each other, so there is no shadowing/false-negative risk to work around.
+ */
+function buildAhoCorasick(patterns: string[]): TrieNode {
+  const root: TrieNode = { children: new Map(), fail: null, output: [] };
+  for (const pattern of patterns) {
+    let node = root;
+    for (const ch of pattern) {
+      let next = node.children.get(ch);
+      if (!next) {
+        next = { children: new Map(), fail: null, output: [] };
+        node.children.set(ch, next);
+      }
+      node = next;
+    }
+    node.output.push(pattern);
+  }
+
+  const queue: TrieNode[] = [];
+  for (const child of root.children.values()) {
+    child.fail = root;
+    queue.push(child);
+  }
+  while (queue.length > 0) {
+    const current = queue.shift() as TrieNode;
+    for (const [ch, child] of current.children) {
+      queue.push(child);
+      let failTo = current.fail;
+      while (failTo !== null && !failTo.children.has(ch)) failTo = failTo.fail;
+      child.fail = failTo !== null ? (failTo.children.get(ch) as TrieNode) : root;
+      if (child.fail.output.length > 0) child.output = child.output.concat(child.fail.output);
+    }
+  }
+
+  return root;
+}
+
+/**
+ * Speed fix: checking hundreds of rules' anchors against a multi-megabyte
+ * transcript corpus one `.includes()` call per anchor is O(rules x
+ * corpusLength) — on a real chain (438 rules, ~9MB corpus) that dominated
+ * the whole scan (measured: ~2.8s of a ~6.3s report, more than the file
+ * reading itself). Aho-Corasick scans the (already-lowercased) corpus once
+ * and finds every anchor that occurs anywhere in it, in a single pass —
+ * O(corpusLength + totalAnchorLength) instead of O(rules x corpusLength).
+ */
+export function findAnchorsPresentInCorpus(allAnchorsLowercased: string[], lowercasedCorpus: string): Set<string> {
+  const unique = [...new Set(allAnchorsLowercased)].filter((a) => a.length > 0);
+  const found = new Set<string>();
+  if (unique.length === 0 || lowercasedCorpus.length === 0) return found;
+
+  const root = buildAhoCorasick(unique);
+  let node = root;
+  for (let i = 0; i < lowercasedCorpus.length; i += 1) {
+    const ch = lowercasedCorpus[i] as string;
+    while (node !== root && !node.children.has(ch)) node = node.fail as TrieNode;
+    node = node.children.get(ch) ?? root;
+    if (node.output.length > 0) {
+      for (const pattern of node.output) found.add(pattern);
+      if (found.size === unique.length) break; // every anchor already confirmed present
+    }
+  }
+
+  return found;
+}

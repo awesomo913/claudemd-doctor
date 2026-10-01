@@ -94,6 +94,16 @@ async function main(): Promise<void> {
 
   const cwd = values.cwd ? values.cwd : process.cwd();
 
+  // Progress line only when stderr is an interactive TTY and we're not
+  // emitting machine-readable JSON (which must stay clean on stdout, and a
+  // TTY check avoids spamming log files/CI output with carriage returns).
+  const showProgress = Boolean(process.stderr.isTTY) && !values.json;
+  const onProgress = showProgress
+    ? (done: number, total: number) => {
+        process.stderr.write(`\rscanning ${done}/${total} sessions…${done >= total ? "\n" : ""}`);
+      }
+    : undefined;
+
   const report = await buildDoctorReport({
     cwd,
     modelAlias: values.model ?? DEFAULT_MODEL_ALIAS,
@@ -103,6 +113,7 @@ async function main(): Promise<void> {
     includeTranscripts: !values["no-transcripts"],
     includeAgents: Boolean(values.agents),
     failOverTokens,
+    onProgress,
   });
 
   const renderOptions = { showAllRules: Boolean(values["all-rules"]) };

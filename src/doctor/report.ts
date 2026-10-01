@@ -4,9 +4,9 @@
  * data — rendering lives in render.ts.
  */
 import { buildInstructionTree, flattenTree, type TreeNode } from "./discovery.js";
-import { splitIntoRules, type Rule } from "./rules.js";
+import { findAnchorsPresentInCorpus, splitIntoRules, type Rule } from "./rules.js";
 import { findConflicts, type ConflictFinding } from "./conflicts.js";
-import { scanForDoctor, checkRuleAgainstCorpus, type MeasuredReality, type TurnDetail } from "./analyze.js";
+import { scanForDoctor, type MeasuredReality, type TurnDetail } from "./analyze.js";
 import { readFile } from "node:fs/promises";
 import { countTokens } from "../core/tokens.js";
 import {
@@ -80,6 +80,10 @@ export interface DoctorReportOptions {
   homeDir?: string;
   /** Override for testing — defaults to the real ~/.claude/projects. */
   projectsDir?: string;
+  /** How many session files to read concurrently (default 4). */
+  concurrency?: number;
+  /** Called after each session file finishes, with (filesDoneSoFar, totalFiles). */
+  onProgress?: (done: number, total: number) => void;
 }
 
 export interface DoctorReport {
@@ -100,6 +104,8 @@ export interface DoctorReport {
   conflicts: ConflictFinding[];
   failOverExceeded: boolean;
   transcriptsSkipped: boolean;
+  /** Non-fatal problems while scanning transcripts (unreadable dirs, stat failures, ...). */
+  transcriptWarnings: string[];
 }
 
 /** Below this many scanned sessions, "never referenced" is too noisy to report (spec: require >= 20). */
@@ -225,6 +231,7 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
   let unmeasurableRules: RuleFinding[] = [];
   let unreferencedHeadline: UnreferencedHeadline | undefined;
   let unreferencedSkippedReason: string | undefined;
+  let transcriptWarnings: string[] = [];
   const rules = await collectRules(roots, warnings);
   const conflicts = findConflicts(rules);
 
@@ -234,16 +241,23 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
       all: options.all,
       maxSessions: options.maxSessions,
       projectsDir: options.projectsDir,
+      concurrency: options.concurrency,
+      onProgress: options.onProgress,
     });
     measured = reality;
+    transcriptWarnings = reality.warnings;
     instructionReplay = computeInstructionReplay(totalTokens, reality);
 
     if (reality.sessionsScanned < MIN_SESSIONS_FOR_UNREFERENCED_CHECK) {
       unreferencedSkippedReason = `not enough history (${reality.sessionsScanned} session${reality.sessionsScanned === 1 ? "" : "s"}) — skipped`;
     } else {
+      // Speed fix: one combined pass over the corpus for every distinct
+      // anchor across every rule, instead of one corpus scan per rule.
+      const allAnchorsLower = rules.flatMap((r) => r.anchors.map((a) => a.toLowerCase()));
+      const presentAnchors = findAnchorsPresentInCorpus(allAnchorsLower, corpus);
+
       const findings: RuleFinding[] = [];
       for (const rule of rules) {
-        const status = checkRuleAgainstCorpus(rule.anchors, corpus);
         const finding: RuleFinding = {
           file: rule.file,
           line: rule.line,
@@ -252,8 +266,12 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
           anchors: rule.anchors,
           tokenCost: countTokens(rule.text),
         };
-        if (status.unmeasurable) unmeasurableRules.push(finding);
-        else if (!status.referenced) findings.push(finding);
+        if (rule.anchors.length === 0) {
+          unmeasurableRules.push(finding);
+          continue;
+        }
+        const referenced = rule.anchors.some((a) => presentAnchors.has(a.toLowerCase()));
+        if (!referenced) findings.push(finding);
       }
       findings.sort((a, b) => b.tokenCost - a.tokenCost);
       unreferencedRules = findings;
@@ -286,6 +304,7 @@ export async function buildDoctorReport(options: DoctorReportOptions): Promise<D
     conflicts,
     failOverExceeded,
     transcriptsSkipped: !options.includeTranscripts,
+    transcriptWarnings,
   };
 }
 

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { checkReferences, extractAnchors, extractTechnicalAnchors, splitIntoRules } from "../src/doctor/rules.js";
+import {
+  checkReferences,
+  extractAnchors,
+  extractTechnicalAnchors,
+  findAnchorsPresentInCorpus,
+  splitIntoRules,
+} from "../src/doctor/rules.js";
 
 describe("splitIntoRules", () => {
   it("splits bullets under headings and folds indented continuation lines", () => {
@@ -83,6 +89,33 @@ describe("extractTechnicalAnchors", () => {
   it("drops a multi-word backticked phrase if any word in it is generic", () => {
     const anchors = extractTechnicalAnchors("Run `npm all` before pushing");
     expect(anchors).not.toContain("npm all");
+  });
+});
+
+describe("findAnchorsPresentInCorpus (speed fix: Aho-Corasick, one pass instead of one .includes() per anchor)", () => {
+  it("finds every anchor actually present and none that aren't, matching per-anchor .includes() semantics", () => {
+    const anchors = ["npm test", "pip install", "never seen anchor"];
+    const corpus = "i ran npm test and it passed, then ran pip install too";
+    const found = findAnchorsPresentInCorpus(anchors, corpus);
+    expect(found.has("npm test")).toBe(true);
+    expect(found.has("pip install")).toBe(true);
+    expect(found.has("never seen anchor")).toBe(false);
+  });
+
+  it("still finds a shorter anchor that is a pure substring of a longer one also present (overlap correctness)", () => {
+    // This is the exact case a naive non-overlapping scan (or a regex
+    // alternation that stops at the first match per position) can miss:
+    // "foo" only ever occurs inside "foobar" in this corpus, never alone.
+    const anchors = ["foo", "foobar"];
+    const corpus = "the command is foobar when run standalone";
+    const found = findAnchorsPresentInCorpus(anchors, corpus);
+    expect(found.has("foobar")).toBe(true);
+    expect(found.has("foo")).toBe(true);
+  });
+
+  it("handles an empty anchor list and an empty corpus without throwing", () => {
+    expect(findAnchorsPresentInCorpus([], "something")).toEqual(new Set());
+    expect(findAnchorsPresentInCorpus(["x"], "")).toEqual(new Set());
   });
 });
 

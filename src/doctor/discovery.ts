@@ -136,11 +136,18 @@ async function buildFileNode(
   return node;
 }
 
-async function globMarkdownRecursive(dir: string): Promise<string[]> {
+async function globMarkdownRecursive(dir: string, warnings: string[]): Promise<string[]> {
   if (!existsSync(dir)) return [];
   const out: string[] = [];
   async function walk(d: string): Promise<void> {
-    const entries = await readdir(d, { withFileTypes: true }).catch(() => []);
+    let entries;
+    try {
+      entries = await readdir(d, { withFileTypes: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") warnings.push(`${d}: readdir failed (${code ?? (err as Error).message})`);
+      return;
+    }
     for (const entry of entries) {
       const full = path.join(d, entry.name);
       if (entry.isDirectory()) {
@@ -198,7 +205,7 @@ export async function buildInstructionTree(options: DiscoveryOptions): Promise<D
   await addRoot(userClaudeMdPath(options.homeDir), "user-main");
 
   // 2. ~/.claude/rules/**/*.md
-  const ruleFiles = await globMarkdownRecursive(claudeRulesDir(options.homeDir));
+  const ruleFiles = await globMarkdownRecursive(claudeRulesDir(options.homeDir), warnings);
   for (const f of ruleFiles) {
     await addRoot(f, "user-rules");
   }

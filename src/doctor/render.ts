@@ -72,6 +72,7 @@ export function renderJson(report: DoctorReport): string {
     tree: annotated,
     totalTokensApprox: report.totalTokens,
     treeWarnings: report.treeWarnings,
+    transcriptWarnings: report.transcriptWarnings,
     cost: report.cost,
     costError: report.costError,
     measuredReality: report.measured ?? null,
@@ -152,13 +153,19 @@ function renderMeasuredRealityLines(report: DoctorReport, out: string[]): void {
   const m = report.measured;
   if (!m) return;
 
+  const successfullyScanned = m.sessionsScanned - m.sessionsUnreadable;
   out.push(
-    `  Sessions: ${m.sessionsAvailable.toLocaleString()} exist, ${m.sessionsScanned.toLocaleString()} scanned` +
+    `  Sessions: ${m.sessionsAvailable.toLocaleString()} exist, ${successfullyScanned.toLocaleString()} of ${m.sessionsScanned.toLocaleString()} scanned` +
+      (m.sessionsUnreadable > 0 ? `, ${m.sessionsUnreadable.toLocaleString()} skipped (unreadable)` : "") +
       (m.subagentSessionsAvailable > 0 ? ` (+ ${m.subagentSessionsAvailable.toLocaleString()} subagent sessions, counted separately)` : ""),
   );
   out.push(`  Assistant turns in scanned sessions: ${m.assistantTurns.toLocaleString()}`);
   if (m.malformedLineCount > 0) {
     out.push(`  ${pc.yellow(`${m.malformedLineCount} malformed line(s) skipped while scanning`)}`);
+  }
+  if (report.transcriptWarnings.length > 0) {
+    out.push(`  ${pc.yellow(`${report.transcriptWarnings.length} transcript-scan warning(s):`)}`);
+    for (const w of report.transcriptWarnings) out.push(`    ${pc.yellow(w)}`);
   }
 
   const r = report.instructionReplay;
@@ -318,9 +325,18 @@ export function renderMarkdown(report: DoctorReport, options: RenderOptions = {}
     out.push("_skipped (`--no-transcripts`)_");
   } else if (report.measured) {
     const m = report.measured;
-    out.push(`- Sessions: ${m.sessionsAvailable} exist, ${m.sessionsScanned} scanned${m.subagentSessionsAvailable > 0 ? ` (+ ${m.subagentSessionsAvailable} subagent sessions, counted separately)` : ""}`);
+    const successfullyScanned = m.sessionsScanned - m.sessionsUnreadable;
+    out.push(
+      `- Sessions: ${m.sessionsAvailable} exist, ${successfullyScanned} of ${m.sessionsScanned} scanned` +
+        (m.sessionsUnreadable > 0 ? `, ${m.sessionsUnreadable} skipped (unreadable)` : "") +
+        (m.subagentSessionsAvailable > 0 ? ` (+ ${m.subagentSessionsAvailable} subagent sessions, counted separately)` : ""),
+    );
     out.push(`- Assistant turns in scanned sessions: ${m.assistantTurns}`);
     if (m.malformedLineCount > 0) out.push(`- ${m.malformedLineCount} malformed line(s) skipped`);
+    if (report.transcriptWarnings.length > 0) {
+      out.push("- **Transcript-scan warnings:**");
+      for (const w of report.transcriptWarnings) out.push(`  - ${w}`);
+    }
     const r = report.instructionReplay;
     if (r) {
       out.push(`- (a) Instruction tokens re-sent ≈ ${r.instructionTokensResent.toLocaleString()} tok`);

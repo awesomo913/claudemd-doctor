@@ -1,3 +1,4 @@
 {"type":"user","sessionId":"session-2","cwd":"C:\\fixture\\proj","timestamp":"2026-01-02T00:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"second session, different cwd below"}]}}
-this is not valid json at all {{{
+this is not valid json at all and has no type marker {{{
+{"type":"assistant","sessionId":"session-2" broken json but still has an assistant type marker {{{
 {"type":"assistant","sessionId":"session-2","cwd":"C:\\fixture\\other","timestamp":"2026-01-02T00:00:01.000Z","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":200,"output_tokens":5}}}
