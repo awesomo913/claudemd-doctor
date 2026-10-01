@@ -195,15 +195,24 @@ function renderTreeLines(nodes: AnnotatedNode[], prefix: string, lines: string[]
   });
 }
 
-/** Available width for a quoted rule/conflict excerpt at the given indent, inside the terminal (or the 100-col default). */
-function quoteBudget(indent: number): number {
-  // -2 for the surrounding "..." quote marks.
-  return Math.max(20, terminalWidth() - indent - 2);
+/**
+ * Available width for a quoted excerpt, given the EXACT text that will
+ * precede the opening quote mark on its printed line (e.g.
+ * `    ~/.claude/CLAUDE.md:8 [positive] `). Fixes a bug where a fixed
+ * 4-space indent was assumed for every quote line: the conflicts section's
+ * prefix also carries the file path, line number, and polarity label, so a
+ * fixed indent under-subtracted and let long prefixes push the quote past
+ * the terminal width, wrapping mid-word.
+ */
+function quoteBudgetForPrefix(prefix: string): number {
+  // -2 for the surrounding "..." quote marks themselves.
+  return Math.max(20, terminalWidth() - visibleLength(prefix) - 2);
 }
 
 function renderRuleFinding(f: RuleFinding, sessionsNote: string, homeDir: string, cwd: string): string {
   const head = f.heading ? pc.dim(` (under "${f.heading}")`) : "";
-  const truncated = truncateAtWord(f.text, quoteBudget(4));
+  const quoteLinePrefix = "    "; // the quote line is printed as `    "..."`, 4-space indent then the quote mark
+  const truncated = truncateAtWord(f.text, quoteBudgetForPrefix(quoteLinePrefix));
   const displayPath = shortenPath(f.file, homeDir, cwd);
   return `  ${pc.dim(`${displayPath}:${f.line}`)} ${pc.cyan(`≈${f.tokenCost} tok`)}${head}\n    "${truncated}"\n    ${pc.dim(sessionsNote)}`;
 }
@@ -211,16 +220,21 @@ function renderRuleFinding(f: RuleFinding, sessionsNote: string, homeDir: string
 function renderConflict(c: ConflictFinding, homeDir: string, cwd: string): string {
   const aPath = shortenPath(c.a.file, homeDir, cwd);
   const bPath = shortenPath(c.b.file, homeDir, cwd);
-  const budget = quoteBudget(4);
-  const aText = truncateAtWord(c.a.text, budget);
-  const bText = truncateAtWord(c.b.text, budget);
   if (c.kind === "duplicate") {
+    const aPrefix = `    ${aPath}:${c.a.line} `;
+    const bPrefix = `    ${bPath}:${c.b.line} `;
+    const aText = truncateAtWord(c.a.text, quoteBudgetForPrefix(aPrefix));
+    const bText = truncateAtWord(c.b.text, quoteBudgetForPrefix(bPrefix));
     return (
       `  ${pc.yellow("near-duplicate")} (${(c.similarity * 100).toFixed(0)}% similar)\n` +
       `    ${pc.dim(`${aPath}:${c.a.line}`)} "${aText}"\n` +
       `    ${pc.dim(`${bPath}:${c.b.line}`)} "${bText}"`
     );
   }
+  const aPrefix = `    ${aPath}:${c.a.line} [${c.a.polarity}] `;
+  const bPrefix = `    ${bPath}:${c.b.line} [${c.b.polarity}] `;
+  const aText = truncateAtWord(c.a.text, quoteBudgetForPrefix(aPrefix));
+  const bText = truncateAtWord(c.b.text, quoteBudgetForPrefix(bPrefix));
   return (
     `  ${pc.red("polarity conflict")} on anchor \`${c.anchor}\`\n` +
     `    ${pc.dim(`${aPath}:${c.a.line}`)} [${c.a.polarity}] "${aText}"\n` +

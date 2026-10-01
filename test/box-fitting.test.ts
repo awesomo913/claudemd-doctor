@@ -133,3 +133,80 @@ describe("quoted rule/conflict text never wraps mid-word", () => {
     }
   });
 });
+
+describe("quote width budget accounts for the line's own prefix, not a fixed indent", () => {
+  // Regression for: a conflict line's real prefix is
+  // `    <path>:<line> [<polarity>] ` — far longer than the 4-space indent
+  // the old budget assumed — so a long file path left no room for the
+  // quote budget's own "-2" guard, and the quote wrapped mid-word onto the
+  // next terminal line instead of being truncated with an ellipsis.
+  const LONG_ROOT = path.join("C:\\", `cmddoctor-boxfit-longprefix-${process.pid}-${Date.now()}`);
+  const LONG_RULE_NAME = "a-very-long-descriptive-rule-filename-chosen-specifically-to-produce-a-long-conflict-line-prefix.md";
+
+  beforeAll(() => {
+    mkdirSync(path.join(LONG_ROOT, ".claude", "rules"), { recursive: true });
+    writeFileSync(path.join(LONG_ROOT, ".claude", "CLAUDE.md"), "# Fixture\n- Always use `pip` for installs.\n");
+    writeFileSync(
+      path.join(LONG_ROOT, ".claude", "rules", LONG_RULE_NAME),
+      "# Long Filename Rule\n" +
+        "- Never use `pip`, use `uv` instead, because this is a deliberately long prose sentence written specifically to exercise the word-boundary truncation logic without ever getting cut off in the middle of a word, which is the whole point of this fixture existing at all.\n",
+    );
+  });
+
+  afterAll(() => {
+    rmSync(LONG_ROOT, { recursive: true, force: true });
+  });
+
+  it("subtracts the real visible prefix (path + line + polarity label) before truncating, so the quote still breaks at a word boundary", async () => {
+    setColumns(72);
+    const report = await buildDoctorReport({
+      cwd: "P:\\boxfit",
+      modelAlias: "sonnet",
+      turnsPerDay: 10,
+      maxSessions: 200,
+      all: false,
+      includeTranscripts: false,
+      includeAgents: false,
+      failOverTokens: undefined,
+      homeDir: LONG_ROOT,
+    });
+
+    const out = renderPretty(report);
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+    const lines = out.split("\n");
+
+    // Find the conflict line whose prefix carries the long rule filename.
+    const longPrefixLine = lines.find((l) => l.includes(LONG_RULE_NAME) && /"[^"]*"/.test(l));
+    expect(longPrefixLine).toBeDefined();
+
+    const plain = stripAnsi(longPrefixLine as string);
+    const match = /"([^"]*)"/.exec(plain);
+    expect(match).not.toBeNull();
+    const quoted = match![1] as string;
+
+    // The budget correctly shrank for this long prefix: the quote is much
+    // shorter than the 72-col default would allow with a naive 4-space
+    // indent assumption, and still ends at a word boundary, never mid-word.
+    if (quoted.endsWith("…")) {
+      const withoutEllipsis = quoted.slice(0, -1);
+      expect(withoutEllipsis.endsWith(" ")).toBe(false);
+      expect(withoutEllipsis.length).toBeGreaterThan(0);
+      // No truncated word fragment: the character right before the cut
+      // point in the ORIGINAL text must be a word boundary (space) or the
+      // kept text must exactly match the start of the original — i.e. the
+      // cut never lands inside a word.
+      const original = "Never use `pip`, use `uv` instead, because this is a deliberately long prose sentence written specifically to exercise the word-boundary truncation logic without ever getting cut off in the middle of a word, which is the whole point of this fixture existing at all.";
+      expect(original.startsWith(withoutEllipsis)).toBe(true);
+      const nextChar = original[withoutEllipsis.length];
+      expect(nextChar === " " || nextChar === undefined).toBe(true);
+    }
+
+    // The real prefix here (indent + long filename + line + polarity
+    // label) is itself longer than the 72-column terminal, so the quote
+    // budget hits its 20-char floor rather than the ~66 chars the old,
+    // buggy fixed-4-space-indent budget would have handed out — proving
+    // the fix is actually reading the real prefix, not ignoring it.
+    const withoutEllipsis = quoted.endsWith("…") ? quoted.slice(0, -1) : quoted;
+    expect(withoutEllipsis.length).toBeLessThanOrEqual(20);
+  });
+});
