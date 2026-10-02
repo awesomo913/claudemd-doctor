@@ -11,6 +11,8 @@
 
 ![demo](docs/assets/demo.gif)
 
+<p align="center"><a href="docs/assets/promo.mp4">▶ Watch the 21-second promo</a></p>
+
 ```
 ┌─ summary ─────────────────────────────────────────────────────────────────
 │  ≈8,686 tokens re-sent every turn  ·  $11.43/mo cached ($104.23 uncached)
