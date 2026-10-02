@@ -26,8 +26,16 @@ jobs:
       - run: npm run build
       - run: npm test
 
+      # Skips when this version was already published by hand from a dev
+      # machine (no NPM_TOKEN secret needed for that path).
       - name: Publish to npm
-        run: npm publish --provenance --access public
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if npm view "claudemd-doctor@${VERSION}" version >/dev/null 2>&1; then
+            echo "claudemd-doctor@${VERSION} already on npm; skipping publish."
+          else
+            npm publish --provenance --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
