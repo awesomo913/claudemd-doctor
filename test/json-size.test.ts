@@ -4,8 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildDoctorReport } from "../src/doctor/report.js";
 import { renderJson } from "../src/doctor/render.js";
+import { makeTempRoot } from "./helpers/temp-root.js";
 
-const TEMP_ROOT = path.join("C:\\", `cmddoctor-jsonsize-test-${process.pid}-${Date.now()}`);
+const TEMP_ROOT = makeTempRoot("jsonsize-test");
 const SCOPED_FIXTURES_DIR = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "fixtures",

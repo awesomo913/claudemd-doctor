@@ -3,8 +3,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { buildDoctorReport } from "../src/doctor/report.js";
 import { renderPretty } from "../src/doctor/render.js";
+import { makeTempRoot } from "./helpers/temp-root.js";
 
-const TEMP_ROOT = path.join("C:\\", `cmddoctor-boxfit-test-${process.pid}-${Date.now()}`);
+const TEMP_ROOT = makeTempRoot("boxfit-test");
 
 beforeAll(() => {
   mkdirSync(path.join(TEMP_ROOT, ".claude"), { recursive: true });
@@ -140,7 +141,7 @@ describe("quote width budget accounts for the line's own prefix, not a fixed ind
   // the old budget assumed — so a long file path left no room for the
   // quote budget's own "-2" guard, and the quote wrapped mid-word onto the
   // next terminal line instead of being truncated with an ellipsis.
-  const LONG_ROOT = path.join("C:\\", `cmddoctor-boxfit-longprefix-${process.pid}-${Date.now()}`);
+  const LONG_ROOT = makeTempRoot("boxfit-longprefix");
   const LONG_RULE_NAME = "a-very-long-descriptive-rule-filename-chosen-specifically-to-produce-a-long-conflict-line-prefix.md";
 
   beforeAll(() => {

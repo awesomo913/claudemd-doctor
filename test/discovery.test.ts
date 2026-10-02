@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildInstructionTree, flattenTree } from "../src/doctor/discovery.js";
 import { slugify } from "../src/core/paths.js";
+import { makeTempRoot } from "./helpers/temp-root.js";
 
 const FIXTURES_HOME = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "home");
 
@@ -12,7 +13,7 @@ const FIXTURES_HOME = path.join(path.dirname(fileURLToPath(import.meta.url)), "f
 // Real dev machines can have a real CLAUDE.md anywhere under the user's
 // home directory, so every synthetic `cwd` used below lives directly under
 // the drive root instead, in a disposable directory removed in afterAll.
-const TEMP_ROOT = path.join("C:\\", `cmddoctor-test-${process.pid}-${Date.now()}`);
+const TEMP_ROOT = makeTempRoot("test");
 
 beforeAll(() => {
   mkdirSync(TEMP_ROOT, { recursive: true });
